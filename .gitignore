@@ -5,6 +5,8 @@ data/records.json
 data/albums.json
 data/trash.json
 data/prompts.json
+data/sync-state.json
+data/backups/
 outputs/*
 !outputs/.gitkeep
 

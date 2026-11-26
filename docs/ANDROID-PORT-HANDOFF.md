@@ -1,8 +1,8 @@
 # NAI Atelier — Android 移植开发交接文档
 
 > 交接时间：2026-11-26（Asia/Shanghai）
-> 文档状态：**设计 / 交接文档**。截至本文档写入，手机端尚未执行任何改动，PC 端代码仍是 v1.7.0。
-> 源项目：`D:\NAI-Atelier`（v1.7.0，私有仓库 <https://github.com/y1090026806-eng/nai-atelier>，标签 `v1.7.0`）
+> 文档状态：**设计 / 交接文档**。PC 端代码已到 **v1.9.0**（含设备间同步）。手机端已能跑 v1.8.0，升级方式是 `git pull` 到 `main`（不要再手工拷包）。
+> 源项目：`D:\NAI-Atelier`（v1.9.0，私有仓库 <https://github.com/y1090026806-eng/nai-atelier>，标签 `v1.9.0`）
 > 目标设备：Android 8.0+（arm64），通过 **DSH Go 本机引擎**或 **Termux** 在手机上运行（见 §3.4 / §5.8）
 > 关联文档：`NAI-Atelier-HANDOFF.md`（功能 / PC 运维 / 接口）、`README.md`（API 细节）
 > 仓库内同步副本：`D:\NAI-Atelier\docs\ANDROID-PORT-HANDOFF.md`（以仓库副本为准）
@@ -250,6 +250,8 @@ async function movePath(source, target) {
 - `adm-zip` 会把整个 ZIP 读进内存；大包建议 `unzip` 命令行（Ubuntu 自带）或先写盘再用 `yauzl`，不要硬扛。
 
 这条是 P2，**M3 能跑起来就不做**。
+
+> **2026-11-27 更新**：v1.9.0 已经实现了应用内「设备间同步」（`docs/DEVICE-SYNC.md`），手机和 PC 在同一个 Wi-Fi 下即可双向合并作品与索引，所以这一节的备份导入导出**优先级进一步降低**，只在「两台设备从不在同一网络」时才考虑。同步协议已经处理了路径、sidecar、回收站、删除墓碑，不必再单独做一套 ZIP 迁移。
 
 ---
 

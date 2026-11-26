@@ -331,6 +331,23 @@
       'confirm-dialog-message',
       'confirm-dialog-cancel',
       'confirm-dialog-ok',
+      'open-sync',
+      'sync-dialog',
+      'sync-close',
+      'sync-device-name',
+      'sync-port',
+      'sync-token',
+      'sync-token-copy',
+      'sync-token-regenerate',
+      'sync-enabled',
+      'sync-address-hint',
+      'sync-save',
+      'sync-peer-url',
+      'sync-peer-check',
+      'sync-peer-hint',
+      'sync-run',
+      'sync-last',
+      'sync-status',
       'toast-stack',
     ];
 
@@ -3170,6 +3187,224 @@
   }
 
   /* ---------------------------------------------------------------------- */
+  /* Device sync                                                            */
+  /* ---------------------------------------------------------------------- */
+
+  const syncPanel = {
+    status: null,
+    busy: false,
+    timer: 0,
+    tokenDirty: false,
+  };
+
+  function syncAddressHint(status) {
+    if (!status) return '';
+    if (!status.enabled) return '同步开关是关的：打开并保存后，另一台设备才能连进来。';
+    if (status.serverError) return status.serverError;
+    const addresses = Array.isArray(status.addresses) ? status.addresses : [];
+    if (addresses.length === 0) {
+      return `正在监听端口 ${status.port}，但没有检测到局域网地址（确认两台设备连的是同一个 Wi-Fi）。`;
+    }
+    return `在另一台设备填：${addresses.map((address) => `${address}:${status.port}`).join(' 或 ')}`;
+  }
+
+  function setSyncMessage(text, tone = '') {
+    if (!ui.syncStatus) return;
+    ui.syncStatus.textContent = text || '';
+    ui.syncStatus.hidden = !text;
+    ui.syncStatus.classList.toggle('is-error', tone === 'error');
+    ui.syncStatus.classList.toggle('is-done', tone === 'done');
+  }
+
+  function setSyncBusy(busy, message = '') {
+    syncPanel.busy = busy;
+    if (ui.syncRun) {
+      ui.syncRun.disabled = busy;
+      ui.syncRun.textContent = busy ? '同步中…' : '开始同步';
+    }
+    if (ui.syncSave) ui.syncSave.disabled = busy;
+    if (busy) setSyncMessage(message || '正在同步…');
+  }
+
+  function formatSyncTime(value) {
+    const text = asText(value);
+    if (!text) return '';
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  function fillSyncForm(status) {
+    if (!status || !ui.syncDialog) return;
+    if (document.activeElement !== ui.syncDeviceName) {
+      ui.syncDeviceName.value = status.deviceName || '';
+    }
+    if (document.activeElement !== ui.syncPort) {
+      ui.syncPort.value = String(status.port || 3801);
+    }
+    ui.syncToken.value = status.token || '';
+    ui.syncEnabled.checked = Boolean(status.enabled);
+    if (document.activeElement !== ui.syncPeerUrl && status.lastPeerUrl) {
+      ui.syncPeerUrl.value = status.lastPeerUrl;
+    }
+    ui.syncAddressHint.textContent = syncAddressHint(status);
+    const last = formatSyncTime(status.lastSyncAt);
+    ui.syncLast.textContent = last ? `上次同步：${last}` : '还没有同步过。';
+    if (status.serverError) setSyncMessage(status.serverError, 'error');
+  }
+
+  async function refreshSyncStatus() {
+    const payload = await requestJson('/api/sync/status');
+    syncPanel.status = payload.status || null;
+    if (ui.syncDialog?.open && syncPanel.status) fillSyncForm(syncPanel.status);
+    return syncPanel.status;
+  }
+
+  async function openSyncDialog() {
+    if (!ui.syncDialog) return;
+    setSyncMessage('');
+    ui.syncDialog.showModal();
+    try {
+      await refreshSyncStatus();
+    } catch (error) {
+      setSyncMessage(error.message || '读取同步设置失败。', 'error');
+    }
+  }
+
+  async function saveSyncSettings({ regenerateToken = false } = {}) {
+    try {
+      setSyncMessage('');
+      const payload = await requestJson('/api/sync/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          deviceName: ui.syncDeviceName.value.trim(),
+          port: Number(ui.syncPort.value) || undefined,
+          enabled: ui.syncEnabled.checked,
+          regenerateToken,
+        }),
+      });
+      syncPanel.status = payload.status || null;
+      fillSyncForm(syncPanel.status);
+      setSyncMessage(
+        regenerateToken
+          ? '已生成新口令：另一台设备也要填同一串口令才能同步。'
+          : '设置已保存。',
+        'done',
+      );
+      showToast('同步设置已保存。', 'success', 2600);
+    } catch (error) {
+      setSyncMessage(error.message || '保存同步设置失败。', 'error');
+    }
+  }
+
+  async function copySyncToken() {
+    const token = ui.syncToken?.value || '';
+    if (!token) {
+      showToast('还没有同步口令，请先保存设置。', 'warning');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(token);
+      showToast('口令已复制。', 'success', 2200);
+    } catch {
+      ui.syncToken.select();
+      showToast('无法自动复制，口令已选中，请按 Ctrl+C。', 'warning', 3600);
+    }
+  }
+
+  async function checkSyncPeer() {
+    const peerUrl = ui.syncPeerUrl.value.trim();
+    if (!peerUrl) {
+      ui.syncPeerHint.textContent = '先填对方地址，例如 192.168.1.8:3801。';
+      return;
+    }
+    ui.syncPeerCheck.disabled = true;
+    ui.syncPeerHint.textContent = '正在连接…';
+    try {
+      const payload = await requestJson('/api/sync/peer-check', {
+        method: 'POST',
+        body: JSON.stringify({ peerUrl }),
+      });
+      const name = asText(payload.deviceName) || '另一台设备';
+      const version = asText(payload.version);
+      ui.syncPeerHint.textContent = `已连接：${name}${version ? `（v${version}）` : ''}。`;
+      setSyncMessage('对方在线，可以开始同步。', 'done');
+    } catch (error) {
+      ui.syncPeerHint.textContent = '连接失败。';
+      setSyncMessage(error.message || '连不上对方。', 'error');
+    } finally {
+      ui.syncPeerCheck.disabled = false;
+    }
+  }
+
+  function startSyncPolling() {
+    stopSyncPolling();
+    syncPanel.timer = window.setInterval(async () => {
+      try {
+        const status = await refreshSyncStatus();
+        if (status?.running && status.progress?.message) {
+          setSyncMessage(status.progress.message);
+        }
+      } catch {
+        // Polling is best-effort; the main request reports real errors.
+      }
+    }, 900);
+  }
+
+  function stopSyncPolling() {
+    if (syncPanel.timer) {
+      window.clearInterval(syncPanel.timer);
+      syncPanel.timer = 0;
+    }
+  }
+
+  async function runDeviceSync() {
+    if (syncPanel.busy) return;
+    const peerUrl = ui.syncPeerUrl.value.trim();
+    if (!peerUrl) {
+      setSyncMessage('请先填写另一台设备的地址，例如 192.168.1.8:3801。', 'error');
+      return;
+    }
+
+    setSyncBusy(true, '正在连接另一台设备…');
+    startSyncPolling();
+    try {
+      const payload = await requestJson('/api/sync/run', {
+        method: 'POST',
+        body: JSON.stringify({ peerUrl }),
+      });
+      const result = payload.result || {};
+      const lines = [
+        result.peerDeviceName ? `已和「${result.peerDeviceName}」对齐。` : '同步完成。',
+        `新增/更新 ${Number(result.created) || 0} 项，删除 ${Number(result.deleted) || 0} 项；接收 ${Number(result.downloaded) || 0} 个文件，发送 ${Number(result.uploaded) || 0} 个。`,
+      ];
+      const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+      if (warnings.length > 0) lines.push(...warnings.slice(0, 4));
+      setSyncMessage(lines.join('\n'), 'done');
+
+      syncPanel.status = payload.status || syncPanel.status;
+      if (syncPanel.status) {
+        ui.syncLast.textContent = `上次同步：${formatSyncTime(syncPanel.status.lastSyncAt) || '刚刚'}`;
+        ui.syncAddressHint.textContent = syncAddressHint(syncPanel.status);
+      }
+
+      await Promise.all([
+        loadHistory().catch(() => {}),
+        loadAlbums().catch(() => {}),
+        loadTrash().catch(() => {}),
+        loadPrompts().catch(() => {}),
+      ]);
+      showToast('同步完成。', 'success', 3200);
+    } catch (error) {
+      setSyncMessage(error.message || '同步失败。', 'error');
+      showToast(error.message || '同步失败。', 'error', 5200);
+    } finally {
+      stopSyncPolling();
+      setSyncBusy(false);
+    }
+  }
+
+  /* ---------------------------------------------------------------------- */
   /* Recycle bin                                                            */
   /* ---------------------------------------------------------------------- */
 
@@ -4884,6 +5119,19 @@
     ui.trashDialog.addEventListener('click', (event) => {
       if (event.target === ui.trashDialog) closeTrashDialog();
     });
+
+    // Device sync.
+    ui.openSync.addEventListener('click', () => openSyncDialog());
+    ui.syncClose.addEventListener('click', () => ui.syncDialog.close());
+    ui.syncDialog.addEventListener('click', (event) => {
+      if (event.target === ui.syncDialog && !syncPanel.busy) ui.syncDialog.close();
+    });
+    ui.syncDialog.addEventListener('close', stopSyncPolling);
+    ui.syncSave.addEventListener('click', () => saveSyncSettings());
+    ui.syncTokenRegenerate.addEventListener('click', () => saveSyncSettings({ regenerateToken: true }));
+    ui.syncTokenCopy.addEventListener('click', copySyncToken);
+    ui.syncPeerCheck.addEventListener('click', checkSyncPeer);
+    ui.syncRun.addEventListener('click', runDeviceSync);
 
     // Prompt library.
     ui.openPromptLibrary.addEventListener('click', () => openPromptDialog());

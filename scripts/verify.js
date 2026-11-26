@@ -23,6 +23,7 @@ const AdmZip = require('adm-zip');
 
 const ROOT = path.resolve(__dirname, '..');
 const { normalizeConfig } = require(path.join(ROOT, 'server.js'));
+const APP_VERSION = require(path.join(ROOT, 'package.json')).version;
 const TEMP_ROOT = path.join(os.tmpdir(), `nai-atelier-verify-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEMP_ROOT, 'data');
 const OUTPUTS_DIR = path.join(TEMP_ROOT, 'outputs');
@@ -609,8 +610,8 @@ async function run() {
   const health = await request('GET', '/api/health');
   check('健康检查', health.status === 200 && health.body.ok === true);
   check(
-    '健康检查返回 1.8.0 版本',
-    health.body?.version === '1.8.0',
+    `健康检查返回 ${APP_VERSION} 版本`,
+    health.body?.version === APP_VERSION,
     JSON.stringify(health.body?.version),
   );
 
@@ -2161,7 +2162,7 @@ async function run() {
     'sidecar 基本信息与 schema 正确',
     metaSidecar.schema === 'nai-atelier.metadata/1' &&
       metaSidecar.app === 'NAI Atelier' &&
-      metaSidecar.appVersion === '1.8.0' &&
+      metaSidecar.appVersion === APP_VERSION &&
       !Number.isNaN(Date.parse(metaSidecar.exportedAt)) &&
       metaSidecar.id === metaItem.id &&
       metaSidecar.filename === metaItem.filename &&
@@ -2217,7 +2218,7 @@ async function run() {
     'PNG 内嵌 NAI-Atelier JSON 可解析且字段正确',
     metaPng.metadata?.id === metaItem.id &&
       metaPng.metadata?.schema === 'nai-atelier.metadata/1' &&
-      metaPng.metadata?.appVersion === '1.8.0' &&
+      metaPng.metadata?.appVersion === APP_VERSION &&
       metaPng.metadata?.relativePath === metaRelative &&
       metaPng.metadata?.albumId === metaAlbum.id &&
       metaPng.metadata?.prompt === metaItem.prompt &&
@@ -2229,7 +2230,7 @@ async function run() {
   const metaParametersExpected = [
     metaItem.prompt,
     'Negative prompt: lowres, bad hands',
-    `Steps: 24, Sampler: k_euler_ancestral, Schedule type: karras, CFG scale: 5.5, Seed: ${metaItem.seed}, Size: 832x1216, Model: nai-diffusion-4-5-full, NAI Atelier: 1.8.0`,
+    `Steps: 24, Sampler: k_euler_ancestral, Schedule type: karras, CFG scale: 5.5, Seed: ${metaItem.seed}, Size: 832x1216, Model: nai-diffusion-4-5-full, NAI Atelier: ${APP_VERSION}`,
   ].join('\n');
   check(
     'PNG parameters chunk 为 A1111 风格文本',
@@ -2631,7 +2632,7 @@ async function run() {
     Boolean(manifest) &&
       manifest.schema === 'nai-atelier.metadata/1' &&
       manifest.app === 'NAI Atelier' &&
-      manifest.appVersion === '1.8.0' &&
+      manifest.appVersion === APP_VERSION &&
       manifest.count === historyForArchive.length &&
       !Number.isNaN(Date.parse(manifest.exportedAt)) &&
       archiveNames.length === historyForArchive.length + 1 &&
@@ -2647,7 +2648,7 @@ async function run() {
     const payload = JSON.parse(entry.getData().toString('utf8'));
     if (
       payload.schema !== 'nai-atelier.metadata/1' ||
-      payload.appVersion !== '1.8.0' ||
+      payload.appVersion !== APP_VERSION ||
       typeof payload.id !== 'string'
     ) {
       archiveFieldsOk = false;

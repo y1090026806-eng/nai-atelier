@@ -8,7 +8,7 @@
   <meta name="description" content="本地运行的 LLM Tags × NovelAI 创作工作台">
   <title>NAI Atelier · LLM × NovelAI</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%231e1e2e'/%3E%3Cpath d='M32 9l5 18 18 5-18 5-5 18-5-18-18-5 18-5z' fill='%23cba6f7'/%3E%3Ccircle cx='46' cy='17' r='3' fill='%2389b4fa'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/style.css?v=1.8.0">
+  <link rel="stylesheet" href="/style.css?v=1.9.0">
 </head>
 <body>
   <div class="ambient ambient--lavender" aria-hidden="true"></div>
@@ -418,7 +418,7 @@
             <span class="connection-dot" aria-hidden="true"></span>
             <span>LOCAL ONLY</span>
           </div>
-          <span class="version-badge">v1.8</span>
+          <span class="version-badge">v1.9</span>
         </div>
       </header>
 
@@ -436,6 +436,7 @@
           <div class="gallery-head-actions">
             <button type="button" class="mini-btn" id="open-prompt-library" title="管理收藏的提示词 / Tags">提示词库 <span class="mini-badge" id="prompt-library-count">0</span></button>
             <button type="button" class="mini-btn" id="open-trash" title="查看回收站中的作品">回收站 <span class="mini-badge" id="trash-count">0</span></button>
+            <button type="button" class="mini-btn" id="open-sync" title="和手机 / 另一台电脑双向同步作品库">同步</button>
             <button type="button" class="mini-btn" id="export-metadata" title="把全部作品参数嵌入 PNG，并下载配套 JSON（ZIP）">元数据</button>
             <button type="button" class="mini-btn mini-btn--danger" id="gallery-clear" title="把当前筛选下的作品移入回收站">清空画廊</button>
             <button type="button" class="icon-btn" id="refresh-history" aria-label="刷新历史作品" title="刷新历史作品">
@@ -798,8 +799,84 @@
     </form>
   </dialog>
 
+  <dialog class="panel-dialog sync-dialog" id="sync-dialog" aria-labelledby="sync-dialog-title">
+    <div class="panel-dialog-head">
+      <div>
+        <span class="eyebrow">DEVICE SYNC</span>
+        <h2 id="sync-dialog-title">两台设备同步</h2>
+      </div>
+      <div class="panel-dialog-actions">
+        <button type="button" class="icon-btn" id="sync-close" aria-label="关闭同步面板">
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
+    <p class="panel-dialog-help">两端都可以离线创作；连上同一个 Wi-Fi 后点「开始同步」，作品、画册、创作记录、回收站和提示词会双向合并。API Key 与模型设置留在各自设备，不会同步；同步前后会自动备份索引文件。</p>
+    <div class="sync-body">
+      <section class="sync-card">
+        <h3>这台设备</h3>
+        <div class="field">
+          <div class="label-row">
+            <label for="sync-device-name">设备名</label>
+            <span class="field-hint">用来分辨两边</span>
+          </div>
+          <input id="sync-device-name" type="text" maxlength="40" autocomplete="off" spellcheck="false" placeholder="例如：书桌 PC / Pixel">
+        </div>
+        <div class="field">
+          <div class="label-row">
+            <label for="sync-port">同步端口</label>
+            <span class="field-hint">只在局域网内开放</span>
+          </div>
+          <input id="sync-port" type="number" min="1024" max="65535" step="1" value="3801">
+        </div>
+        <div class="field">
+          <div class="label-row">
+            <label for="sync-token">同步口令</label>
+            <span class="field-hint">两台设备必须一致</span>
+          </div>
+          <div class="sync-token-row">
+            <input id="sync-token" type="text" readonly spellcheck="false">
+            <button type="button" class="mini-btn" id="sync-token-copy">复制</button>
+            <button type="button" class="mini-btn" id="sync-token-regenerate">重新生成</button>
+          </div>
+        </div>
+        <label class="sync-toggle">
+          <input type="checkbox" id="sync-enabled">
+          <span>允许另一台设备连接本机</span>
+        </label>
+        <p class="sync-hint" id="sync-address-hint">打开同步后，在另一台设备填写这里显示的地址。</p>
+        <div class="sync-card-actions">
+          <button type="button" class="btn btn-primary" id="sync-save">保存设置</button>
+        </div>
+      </section>
+
+      <section class="sync-card">
+        <h3>另一台设备</h3>
+        <div class="field">
+          <div class="label-row">
+            <label for="sync-peer-url">对方地址</label>
+            <span class="field-hint">IP:端口</span>
+          </div>
+          <input id="sync-peer-url" type="text" autocomplete="off" spellcheck="false" placeholder="例如：192.168.1.8:3801">
+        </div>
+        <div class="sync-peer-actions">
+          <button type="button" class="mini-btn" id="sync-peer-check">检测连接</button>
+          <span class="sync-hint" id="sync-peer-hint">先确认对方已打开同步开关，并且口令相同。</span>
+        </div>
+        <div class="sync-card-actions">
+          <button type="button" class="btn btn-primary" id="sync-run">开始同步</button>
+        </div>
+        <p class="sync-hint" id="sync-last">还没有同步过。</p>
+        <div class="sync-status" id="sync-status" role="status" aria-live="polite" hidden></div>
+      </section>
+    </div>
+    <div class="sync-foot">
+      <p class="sync-hint">作品排序以最后调整过顺序的一台设备为准；两边同时改同一张图时，较新的修改生效。移入回收站、恢复、彻底删除都会同步到另一端。</p>
+    </div>
+  </dialog>
+
   <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="/app.js?v=1.8.0" defer></script>
+  <script src="/app.js?v=1.9.0" defer></script>
 </body>
 </html>

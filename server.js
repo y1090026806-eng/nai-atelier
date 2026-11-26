@@ -10,6 +10,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const os = require('node:os');
 const crypto = require('node:crypto');
 
 const express = require('express');
@@ -17,11 +18,18 @@ const cors = require('cors');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
 
+const {
+  SNAPSHOT_VERSION,
+  mergeSnapshots,
+  sha256Hex,
+  revisionHash,
+} = require('./lib/sync-merge');
+
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
@@ -41,9 +49,22 @@ const ALBUMS_DIR = path.join(OUTPUTS_DIR, 'albums');
 // Hidden folder: images moved here are no longer gallery records. A dedicated
 // static mount below serves thumbnails, while /outputs keeps dotfiles denied.
 const TRASH_DIR = path.join(OUTPUTS_DIR, '.trash');
+// Hidden staging folder for images received from the other device. Files only
+// leave it after their checksum matches and the merged index accepts them.
+const SYNC_INCOMING_DIR = path.join(OUTPUTS_DIR, '.incoming');
+const SYNC_STATE_FILE = path.join(DATA_DIR, 'sync-state.json');
+const SYNC_BACKUP_DIR = path.join(DATA_DIR, 'backups');
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number.parseInt(process.env.PORT, 10) || 3000;
+
+const DEFAULT_SYNC_PORT = 3801;
+const SYNC_SNAPSHOT_LIMIT = 8 * 1024 * 1024;
+const SYNC_FILE_LIMIT = 64 * 1024 * 1024;
+const SYNC_MAX_FILES_PER_ROUND = 300;
+const SYNC_BACKUP_KEEP = 5;
+const MAX_SYNC_TOKEN = 64;
+const MAX_SYNC_STATE_ENTRIES = 2_000;
 
 const DEFAULT_NAI_TIMEOUT_SECONDS = 300;
 const MODEL_LIST_TIMEOUT_MS = 30_000;
@@ -347,6 +368,33 @@ function normalizeNovelAiPreset(raw) {
   };
 }
 
+function generateSyncToken() {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(12);
+  let body = '';
+  for (let index = 0; index < 12; index += 1) body += alphabet[bytes[index] % alphabet.length];
+  return `nai-${body.slice(0, 4)}-${body.slice(4, 8)}-${body.slice(8, 12)}`;
+}
+
+/**
+ * 同步设置：两台设备用同一个口令互相访问，配置里只存"本机口令 + 端口"。
+ * 口令为空时自动生成一次，写回 config.json 后保持稳定。
+ */
+function normalizeSyncSettings(raw) {
+  const source = isPlainObject(raw) ? raw : {};
+  const token = asString(source.token, '').trim();
+  const deviceName = asString(source.deviceName, '').trim().slice(0, 40);
+  const lastSyncAt = new Date(asString(source.lastSyncAt, ''));
+  return {
+    enabled: Boolean(source.enabled),
+    port: clampInt(source.port, DEFAULT_SYNC_PORT, 1024, 65535),
+    token: /^[!-~]{6,64}$/.test(token) ? token.slice(0, MAX_SYNC_TOKEN) : generateSyncToken(),
+    deviceName: deviceName || asString(process.env.COMPUTERNAME, '').slice(0, 40) || 'NAI-Atelier',
+    lastPeerUrl: asString(source.lastPeerUrl, '').trim().slice(0, 200),
+    lastSyncAt: Number.isNaN(lastSyncAt.getTime()) ? '' : lastSyncAt.toISOString(),
+  };
+}
+
 function normalizeConfig(raw) {
   const source = isPlainObject(raw) ? raw : {};
   const llmSource = isPlainObject(source.llm) ? source.llm : {};
@@ -377,6 +425,7 @@ function normalizeConfig(raw) {
       ...naiCore,
       presets: naiPresets,
     },
+    sync: normalizeSyncSettings(source.sync),
   };
 }
 
@@ -1301,6 +1350,21 @@ let prompts = [];
 let writeQueue = Promise.resolve();
 let storageReady = false;
 
+/* Sync runtime state ---------------------------------------------------- */
+
+let syncState = {
+  deviceId: '',
+  orderUpdatedAt: '',
+  historyTombstones: {},
+  albumTombstones: {},
+  promptTombstones: {},
+};
+let syncServerHandle = null;
+let syncServerError = '';
+let syncRunning = false;
+let syncProgress = { phase: '', message: '', startedAt: 0 };
+const syncFileHashCache = new Map();
+
 async function atomicWriteJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
@@ -1359,12 +1423,15 @@ function normalizeAlbumRecord(raw) {
   const id = asString(raw.id, '').trim().slice(0, 80);
   if (!ALBUM_ID_RE.test(id)) return null;
   const createdAt = new Date(asString(raw.createdAt, ''));
+  const updatedAt = new Date(asString(raw.updatedAt, ''));
+  const createdAtIso = Number.isNaN(createdAt.getTime())
+    ? new Date().toISOString()
+    : createdAt.toISOString();
   return {
     id,
     name,
-    createdAt: Number.isNaN(createdAt.getTime())
-      ? new Date().toISOString()
-      : createdAt.toISOString(),
+    createdAt: createdAtIso,
+    updatedAt: Number.isNaN(updatedAt.getTime()) ? createdAtIso : updatedAt.toISOString(),
     coverId: asString(raw.coverId, '').trim().slice(0, 80),
   };
 }
@@ -1447,6 +1514,10 @@ function normalizeHistoryRecord(raw) {
   if (!OUTPUT_FILENAME_RE.test(filename)) return null;
 
   const createdAt = new Date(asString(raw.createdAt, ''));
+  const updatedAt = new Date(asString(raw.updatedAt, ''));
+  const createdAtIso = Number.isNaN(createdAt.getTime())
+    ? new Date().toISOString()
+    : createdAt.toISOString();
   const width = clampInt(raw.width, 832, 64, 2048);
   const height = clampInt(raw.height, 1216, 64, 2048);
   const seed = Number.isInteger(raw.seed) && raw.seed >= 0 ? raw.seed : -1;
@@ -1481,7 +1552,8 @@ function normalizeHistoryRecord(raw) {
     qualityToggle: Boolean(raw.qualityToggle),
     llmProvider: asString(raw.llmProvider, 'openai').slice(0, 40),
     llmModel: asString(raw.llmModel, '').slice(0, 200),
-    createdAt: Number.isNaN(createdAt.getTime()) ? new Date().toISOString() : createdAt.toISOString(),
+    createdAt: createdAtIso,
+    updatedAt: Number.isNaN(updatedAt.getTime()) ? createdAtIso : updatedAt.toISOString(),
     elapsedMs: clampInt(raw.elapsedMs, 0, 0, 3_600_000),
   };
 }
@@ -1865,6 +1937,9 @@ async function initializeStorage() {
   }
   if (coversChanged) await atomicWriteJson(ALBUMS_FILE, albums);
 
+  await fs.mkdir(SYNC_INCOMING_DIR, { recursive: true });
+  await loadSyncState();
+
   storageReady = true;
 }
 
@@ -1882,6 +1957,10 @@ async function saveConfig(rawBody) {
     novelai: {
       ...activeConfig.novelai,
       ...(isPlainObject(incoming.novelai) ? incoming.novelai : {}),
+    },
+    sync: {
+      ...activeConfig.sync,
+      ...(isPlainObject(incoming.sync) ? incoming.sync : {}),
     },
   };
 
@@ -1954,6 +2033,7 @@ async function setAlbumCover(albumId, historyId) {
   if (historyId === null || historyId === undefined || historyId === '') {
     if (album.coverId) {
       album.coverId = '';
+      album.updatedAt = new Date().toISOString();
       await persistAlbums();
     }
     return publicAlbumList().find((entry) => entry.id === albumId);
@@ -1971,6 +2051,7 @@ async function setAlbumCover(albumId, historyId) {
   }
 
   album.coverId = item.id;
+  album.updatedAt = new Date().toISOString();
   await persistAlbums();
   return publicAlbumList().find((entry) => entry.id === albumId);
 }
@@ -2003,6 +2084,7 @@ async function createAlbum(rawName) {
     id: crypto.randomUUID(),
     name,
     createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     coverId: '',
   };
   albums.push(album);
@@ -2039,6 +2121,7 @@ async function renameAlbum(albumId, rawName) {
 
   const previousName = album.name;
   album.name = name;
+  album.updatedAt = new Date().toISOString();
   try {
     await persistAlbums();
   } catch (error) {
@@ -2138,6 +2221,7 @@ async function relocateHistoryItem(item, targetAlbumId) {
   item.relativePath = targetRelative;
   item.url = buildImageUrl(targetRelative);
   item.albumId = targetAlbumId;
+  if (previousAlbumId !== targetAlbumId) item.updatedAt = new Date().toISOString();
   if (previousAlbumId !== targetAlbumId) await cleanupEmptyAlbumDir(previousAlbumId);
 
   // Keep the sidecar next to the image and refresh both copies so the stored
@@ -2222,6 +2306,7 @@ function normalizeTrashRecord(raw) {
   const deletedAt = new Date(asString(raw.deletedAt, ''));
   return {
     id,
+    itemId: asString(raw.itemId, '').trim().slice(0, 80) || item.id,
     filename: item.filename,
     trashFilename,
     item,
@@ -2287,6 +2372,7 @@ async function moveHistoryItemToTrash(item) {
 
   const record = {
     id: crypto.randomUUID(),
+    itemId: item.id,
     filename: item.filename,
     trashFilename,
     item: clone(item),
@@ -2299,6 +2385,7 @@ async function moveHistoryItemToTrash(item) {
     const overflow = trashItems.pop();
     if (!overflow) break;
     await fs.rm(path.join(TRASH_DIR, overflow.trashFilename), { force: true }).catch(() => {});
+    markHistoryGone(overflow.itemId || overflow.item?.id);
   }
 
   return record;
@@ -2334,8 +2421,10 @@ async function deleteHistoryItem(historyId, { permanent = false } = {}) {
   }
 
   historyItems.splice(index, 1);
+  if (permanent) markHistoryGone(item.id);
   await persistHistory();
   if (trashed) await persistTrash();
+  if (permanent) await persistSyncState();
   if (clearAlbumCoverForItem(item)) await persistAlbums();
   await cleanupEmptyAlbumDir(item.albumId);
   return { item, trashed };
@@ -2430,6 +2519,7 @@ async function restoreTrashItem(trashId) {
     filename,
     relativePath: targetRelative,
     albumId,
+    updatedAt: new Date().toISOString(),
   });
   if (!restored) {
     throw new AppError('回收站记录已损坏，无法恢复。', 500, 'TRASH_INVALID');
@@ -2438,6 +2528,10 @@ async function restoreTrashItem(trashId) {
   historyItems.unshift(restored);
   if (historyItems.length > MAX_HISTORY) historyItems = historyItems.slice(0, MAX_HISTORY);
   trashItems.splice(index, 1);
+  if (syncState.historyTombstones[restored.id]) {
+    delete syncState.historyTombstones[restored.id];
+    await persistSyncState();
+  }
   await persistHistory();
   await persistTrash();
   try {
@@ -2457,7 +2551,9 @@ async function deleteTrashItem(trashId, { keepRecord = false } = {}) {
   await fs.rm(path.join(TRASH_DIR, record.trashFilename), { force: true }).catch(() => {});
   if (!keepRecord) {
     trashItems.splice(index, 1);
+    markHistoryGone(record.itemId || record.item?.id);
     await persistTrash();
+    await persistSyncState();
   }
   return record;
 }
@@ -2466,9 +2562,11 @@ async function emptyTrash() {
   const count = trashItems.length;
   for (const record of trashItems) {
     await fs.rm(path.join(TRASH_DIR, record.trashFilename), { force: true }).catch(() => {});
+    markHistoryGone(record.itemId || record.item?.id);
   }
   trashItems = [];
   await persistTrash();
+  if (count > 0) await persistSyncState();
   return { deleted: count };
 }
 
@@ -2485,12 +2583,17 @@ function normalizePromptRecord(raw) {
   const negative = asString(raw.negative, '').trim().slice(0, 8_000);
   if (!positive && !negative) return null;
   const createdAt = new Date(asString(raw.createdAt, ''));
+  const updatedAt = new Date(asString(raw.updatedAt, ''));
+  const createdAtIso = Number.isNaN(createdAt.getTime())
+    ? new Date().toISOString()
+    : createdAt.toISOString();
   return {
     id: asString(raw.id, '').trim().slice(0, 80) || crypto.randomUUID(),
     name,
     positive,
     negative,
-    createdAt: Number.isNaN(createdAt.getTime()) ? new Date().toISOString() : createdAt.toISOString(),
+    createdAt: createdAtIso,
+    updatedAt: Number.isNaN(updatedAt.getTime()) ? createdAtIso : updatedAt.toISOString(),
   };
 }
 
@@ -2553,16 +2656,19 @@ async function savePrompt(rawBody) {
     existing.name = name;
     existing.positive = positive;
     existing.negative = negative;
+    existing.updatedAt = new Date().toISOString();
     await persistPrompts();
     return existing;
   }
 
+  const timestamp = new Date().toISOString();
   const record = {
     id: crypto.randomUUID(),
     name,
     positive,
     negative,
-    createdAt: new Date().toISOString(),
+    createdAt: timestamp,
+    updatedAt: timestamp,
   };
   prompts.unshift(record);
   await persistPrompts();
@@ -2575,7 +2681,9 @@ async function deletePrompt(id) {
     throw new AppError('提示词收藏不存在，可能已被删除。', 404, 'PROMPT_NOT_FOUND');
   }
   const [record] = prompts.splice(index, 1);
+  markPromptGone(record.id);
   await persistPrompts();
+  await persistSyncState();
   return record;
 }
 
@@ -2610,7 +2718,9 @@ async function reorderHistoryItems(rawIds) {
     historyItems[slot] = ordered[offset];
   });
 
+  syncState.orderUpdatedAt = new Date().toISOString();
   await persistHistory();
+  await persistSyncState();
   return clone(historyItems);
 }
 
@@ -2689,15 +2799,754 @@ async function deleteAlbum(albumId) {
   const rescued = await rescueUnindexedAlbumFiles(albumId);
 
   albums = albums.filter((entry) => entry.id !== albumId);
+  markAlbumGone(albumId);
   await persistAlbums();
+  await persistSyncState();
   // Only remove the directory when it is actually empty.
   await fs.rmdir(albumDirectory(albumId)).catch(() => {});
   return { deleted: albumId, moved, rescued };
 }
 
 /* ------------------------------------------------------------------ */
-/* Generation pipeline                                                 */
+/* Library sync (device <-> device)                                     */
 /* ------------------------------------------------------------------ */
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function sanitizeTombstoneTable(raw, limit = MAX_SYNC_STATE_ENTRIES) {
+  const table = {};
+  if (!isPlainObject(raw)) return table;
+  const rows = [];
+  for (const [id, ts] of Object.entries(raw)) {
+    if (typeof id !== 'string' || !id || id.length > 80) continue;
+    const time = Date.parse(asString(ts, ''));
+    if (!Number.isFinite(time) || time <= 0) continue;
+    rows.push([id, new Date(time).toISOString()]);
+  }
+  rows.sort((one, two) => Date.parse(two[1]) - Date.parse(one[1]));
+  for (const [id, ts] of rows.slice(0, limit)) table[id] = ts;
+  return table;
+}
+
+function capTombstoneTable(table, limit = MAX_SYNC_STATE_ENTRIES) {
+  const keys = Object.keys(table);
+  if (keys.length <= limit) return table;
+  keys.sort((one, two) => Date.parse(table[one]) - Date.parse(table[two]));
+  for (const key of keys.slice(0, keys.length - limit)) delete table[key];
+  return table;
+}
+
+function markHistoryGone(id) {
+  if (typeof id !== 'string' || !id) return;
+  syncState.historyTombstones[id] = nowIso();
+  capTombstoneTable(syncState.historyTombstones);
+  const index = historyItems.findIndex((item) => item.id === id);
+  if (index >= 0) historyItems.splice(index, 1);
+}
+
+function markAlbumGone(id) {
+  if (typeof id !== 'string' || !id) return;
+  syncState.albumTombstones[id] = nowIso();
+  capTombstoneTable(syncState.albumTombstones);
+}
+
+function markPromptGone(id) {
+  if (typeof id !== 'string' || !id) return;
+  syncState.promptTombstones[id] = nowIso();
+  capTombstoneTable(syncState.promptTombstones);
+}
+
+function normalizeSyncState(raw) {
+  const source = isPlainObject(raw) ? raw : {};
+  const deviceId = asString(source.deviceId, '').trim().slice(0, 80);
+  const orderUpdatedAt = new Date(asString(source.orderUpdatedAt, ''));
+  return {
+    deviceId: deviceId || crypto.randomUUID(),
+    orderUpdatedAt: Number.isNaN(orderUpdatedAt.getTime()) ? '' : orderUpdatedAt.toISOString(),
+    historyTombstones: sanitizeTombstoneTable(source.historyTombstones),
+    albumTombstones: sanitizeTombstoneTable(source.albumTombstones),
+    promptTombstones: sanitizeTombstoneTable(source.promptTombstones),
+  };
+}
+
+async function persistSyncState() {
+  const snapshot = {
+    deviceId: syncState.deviceId,
+    orderUpdatedAt: syncState.orderUpdatedAt,
+    historyTombstones: { ...syncState.historyTombstones },
+    albumTombstones: { ...syncState.albumTombstones },
+    promptTombstones: { ...syncState.promptTombstones },
+  };
+  await queueWrite(() => atomicWriteJson(SYNC_STATE_FILE, snapshot));
+}
+
+async function loadSyncState() {
+  const raw = await readJsonFile(SYNC_STATE_FILE, null);
+  syncState = normalizeSyncState(raw);
+  // A tombstone for something that is still present locally would delete it on
+  // the next merge; drop those so the local copy wins again.
+  const liveHistory = new Set(historyItems.map((item) => item.id));
+  const liveTrash = new Set(trashItems.map((record) => record.itemId || record.item?.id));
+  for (const id of Object.keys(syncState.historyTombstones)) {
+    if (liveHistory.has(id) || liveTrash.has(id)) delete syncState.historyTombstones[id];
+  }
+  for (const id of Object.keys(syncState.albumTombstones)) {
+    if (albums.some((album) => album.id === id)) delete syncState.albumTombstones[id];
+  }
+  for (const id of Object.keys(syncState.promptTombstones)) {
+    if (prompts.some((prompt) => prompt.id === id)) delete syncState.promptTombstones[id];
+  }
+  await persistSyncState();
+}
+
+async function syncFileSha256(absolutePath, stat) {
+  const key = path.resolve(absolutePath);
+  const cached = syncFileHashCache.get(key);
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    return cached.sha256;
+  }
+  const buffer = await fs.readFile(absolutePath);
+  const sha256 = sha256Hex(buffer);
+  syncFileHashCache.set(key, { size: stat.size, mtimeMs: stat.mtimeMs, sha256 });
+  return sha256;
+}
+
+async function syncFileEntry(kind, id, filename, absolutePath, extra = {}) {
+  const stat = await fs.stat(absolutePath).catch(() => null);
+  if (!stat || !stat.isFile()) return null;
+  const sha256 = await syncFileSha256(absolutePath, stat);
+  return { kind, id, filename, size: stat.size, sha256, ...extra };
+}
+
+async function buildSyncSnapshot() {
+  const files = [];
+  for (const item of historyItems) {
+    const entry = await syncFileEntry(
+      'image',
+      item.id,
+      item.filename,
+      imageAbsolutePathForItem(item),
+      { relativePath: relativePathForAlbum(item.albumId, item.filename) },
+    );
+    if (entry) files.push(entry);
+  }
+  for (const record of trashItems) {
+    const entry = await syncFileEntry(
+      'trash',
+      record.itemId || record.item?.id,
+      record.filename,
+      path.join(TRASH_DIR, record.trashFilename),
+      { trashFilename: record.trashFilename },
+    );
+    if (entry) files.push(entry);
+  }
+
+  return {
+    version: SNAPSHOT_VERSION,
+    deviceId: syncState.deviceId,
+    deviceName: activeConfig.sync.deviceName,
+    generatedAt: nowIso(),
+    history: clone(historyItems),
+    trash: clone(trashItems),
+    albums: clone(albums),
+    records: clone(records),
+    prompts: clone(prompts),
+    files,
+    state: {
+      orderUpdatedAt: syncState.orderUpdatedAt,
+      historyTombstones: { ...syncState.historyTombstones },
+      albumTombstones: { ...syncState.albumTombstones },
+      promptTombstones: { ...syncState.promptTombstones },
+    },
+  };
+}
+
+async function backupLibraryFiles() {
+  await fs.mkdir(SYNC_BACKUP_DIR, { recursive: true });
+  const stamp = nowIso().replace(/[:.]/g, '-');
+  const directory = path.join(SYNC_BACKUP_DIR, stamp);
+  await fs.mkdir(directory, { recursive: true });
+  for (const file of [HISTORY_FILE, TRASH_FILE, ALBUMS_FILE, RECORDS_FILE, PROMPTS_FILE, SYNC_STATE_FILE]) {
+    await fs.copyFile(file, path.join(directory, path.basename(file))).catch(() => {});
+  }
+  const entries = await fs.readdir(SYNC_BACKUP_DIR, { withFileTypes: true }).catch(() => []);
+  const folders = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  while (folders.length > SYNC_BACKUP_KEEP) {
+    const oldest = folders.shift();
+    await fs.rm(path.join(SYNC_BACKUP_DIR, oldest), { recursive: true, force: true }).catch(() => {});
+  }
+  return directory;
+}
+
+function syncIncomingPath(kind, id) {
+  return path.join(SYNC_INCOMING_DIR, `${kind}-${id}.bin`);
+}
+
+/**
+ * 把合并后的快照落盘：搬运/导入图片、删掉已经不在索引里的旧文件、重写索引。
+ * 文件先全部就位再写 JSON，避免中途失败留下"索引里有、磁盘上没有"的记录。
+ */
+async function applySyncSnapshot(rawMerged) {
+  if (!isPlainObject(rawMerged)) {
+    throw new AppError('同步数据格式无效。', 400, 'SYNC_PAYLOAD_INVALID');
+  }
+  const incomingHistory = Array.isArray(rawMerged.history) ? rawMerged.history : [];
+  const incomingTrash = Array.isArray(rawMerged.trash) ? rawMerged.trash : [];
+  const incomingAlbums = Array.isArray(rawMerged.albums) ? rawMerged.albums : [];
+  const incomingRecords = Array.isArray(rawMerged.records) ? rawMerged.records : [];
+  const incomingPrompts = Array.isArray(rawMerged.prompts) ? rawMerged.prompts : [];
+
+  if (
+    incomingHistory.length > MAX_HISTORY * 2 ||
+    incomingTrash.length > MAX_TRASH * 2 ||
+    incomingAlbums.length > MAX_ALBUMS * 2 ||
+    incomingRecords.length > MAX_RECORDS * 2 ||
+    incomingPrompts.length > MAX_PROMPTS * 2
+  ) {
+    throw new AppError('同步数据条目过多，已拒绝。', 413, 'SYNC_PAYLOAD_TOO_LARGE');
+  }
+
+  const warnings = [];
+  const touched = new Set();
+  const desiredPaths = new Set();
+  const nextHistory = [];
+  const nextTrash = [];
+
+  // Everything below rewrites the indexes in place; keep a copy first so a bad
+  // merge can be rolled back by hand from data/backups/<timestamp>/.
+  const backupDir = await backupLibraryFiles().catch((error) => {
+    console.warn('[sync] 备份索引失败：', error.message);
+    return '';
+  });
+  if (!backupDir) warnings.push('同步前的索引备份没有写成，若结果异常请勿继续操作。');
+
+  const oldImagePaths = historyItems.map((item) => imageAbsolutePathForItem(item));
+  const oldTrashPaths = trashItems.map((record) => path.join(TRASH_DIR, record.trashFilename));
+
+  await fs.mkdir(SYNC_INCOMING_DIR, { recursive: true });
+  await fs.mkdir(TRASH_DIR, { recursive: true });
+
+  /* 1. Live images. */
+  for (const raw of incomingHistory) {
+    if (nextHistory.length >= MAX_HISTORY) break;
+    const item = normalizeHistoryRecord({ ...raw, id: typeof raw?.id === 'string' ? raw.id : '' });
+    if (!item) continue;
+
+    const targetRelative = relativePathForAlbum(item.albumId, item.filename);
+    const targetAbsolute = resolveOutputPath(targetRelative);
+    const incomingFile = syncIncomingPath('image', item.id);
+    const hasIncoming = await fileExists(incomingFile);
+    const found = hasIncoming ? null : await findExistingOutputPath(item);
+
+    if (!hasIncoming && !found) {
+      warnings.push(`「${item.filename}」在两台设备上都不存在，已从索引移除。`);
+      syncState.historyTombstones[item.id] = nowIso();
+      continue;
+    }
+
+    await fs.mkdir(path.dirname(targetAbsolute), { recursive: true });
+    if (hasIncoming) {
+      await fs.rm(targetAbsolute, { force: true }).catch(() => {});
+      await fs.rename(incomingFile, targetAbsolute);
+      touched.add(item.id);
+    } else if (path.resolve(found.absolutePath) !== path.resolve(targetAbsolute)) {
+      if (await fileExists(targetAbsolute)) await fs.rm(targetAbsolute, { force: true }).catch(() => {});
+      await fs.rename(found.absolutePath, targetAbsolute);
+      touched.add(item.id);
+    }
+    item.relativePath = targetRelative;
+    item.url = buildImageUrl(targetRelative);
+    desiredPaths.add(path.resolve(targetAbsolute));
+    nextHistory.push(item);
+  }
+
+  // Files for entries we are about to drop from the index must go as well.
+  for (const id of Object.keys(syncState.historyTombstones)) {
+    if (nextHistory.some((item) => item.id === id)) delete syncState.historyTombstones[id];
+  }
+
+  /* 2. Trash records. */
+  for (const raw of incomingTrash) {
+    if (nextTrash.length >= MAX_TRASH) {
+      const overflowId = asString(raw?.itemId) || asString(raw?.item?.id);
+      if (overflowId) {
+        syncState.historyTombstones[overflowId] = nowIso();
+        const stale = path.join(TRASH_DIR, path.basename(asString(raw?.trashFilename, '')));
+        if (raw?.trashFilename) await fs.rm(stale, { force: true }).catch(() => {});
+      }
+      continue;
+    }
+    const record = normalizeTrashRecord(raw);
+    if (!record) continue;
+    const target = path.join(TRASH_DIR, record.trashFilename);
+    const incomingFile = syncIncomingPath('trash', record.itemId);
+
+    if (!(await fileExists(target))) {
+      if (await fileExists(incomingFile)) {
+        await fs.rename(incomingFile, target);
+      } else {
+        const found = await findExistingOutputPath(record.item);
+        if (found) {
+          await fs.mkdir(TRASH_DIR, { recursive: true });
+          await fs.rename(found.absolutePath, target);
+          await removeMetadataSidecarForImage(found.absolutePath);
+        } else {
+          warnings.push(`回收站里的「${record.filename}」两台设备都没有文件，已永久移除。`);
+          syncState.historyTombstones[record.itemId] = nowIso();
+          continue;
+        }
+      }
+    }
+    desiredPaths.add(path.resolve(target));
+    nextTrash.push(record);
+  }
+
+  /* 3. Remove files that no longer belong to any entry. */
+  for (const absolute of [...oldImagePaths, ...oldTrashPaths]) {
+    if (!absolute) continue;
+    if (desiredPaths.has(path.resolve(absolute))) continue;
+    if (!(await fileExists(absolute))) continue;
+    await fs.rm(absolute, { force: true }).catch(() => {});
+    await removeMetadataSidecarForImage(absolute);
+  }
+
+  /* 4. Replace the indexes. */
+  albums = normalizeAlbumList(incomingAlbums);
+  records = normalizeRecordList(incomingRecords);
+  prompts = normalizePromptList(incomingPrompts);
+  historyItems = nextHistory;
+  trashItems = nextTrash;
+
+  const state = isPlainObject(rawMerged.state) ? rawMerged.state : {};
+  const orderUpdatedAt = new Date(asString(state.orderUpdatedAt, ''));
+  if (!Number.isNaN(orderUpdatedAt.getTime())) {
+    syncState.orderUpdatedAt = orderUpdatedAt.toISOString();
+  }
+  syncState.historyTombstones = sanitizeTombstoneTable(state.historyTombstones);
+  syncState.albumTombstones = sanitizeTombstoneTable(state.albumTombstones);
+  syncState.promptTombstones = sanitizeTombstoneTable(state.promptTombstones);
+
+  // Covers that point at a work which is not in the merged gallery.
+  const knownIds = new Set(historyItems.map((item) => item.id));
+  for (const album of albums) {
+    if (album.coverId && !knownIds.has(album.coverId)) album.coverId = '';
+  }
+
+  await persistHistory();
+  await persistTrash();
+  await persistAlbums();
+  await persistRecords();
+  await persistPrompts();
+  await persistSyncState();
+
+  for (const id of touched) {
+    const item = historyItems.find((entry) => entry.id === id);
+    if (!item) continue;
+    try {
+      await attachMetadataForItem(item);
+    } catch (error) {
+      console.warn(`[sync] 重写元数据失败 ${item.filename}：${error.message}`);
+    }
+  }
+
+  await cleanupEmptyAlbumDirs();
+  await fs.rm(SYNC_INCOMING_DIR, { recursive: true, force: true }).catch(() => {});
+  await fs.mkdir(SYNC_INCOMING_DIR, { recursive: true }).catch(() => {});
+
+  return {
+    history: historyItems.length,
+    trash: trashItems.length,
+    albums: albums.length,
+    records: records.length,
+    prompts: prompts.length,
+    movedFiles: touched.size,
+    warnings,
+  };
+}
+
+async function cleanupEmptyAlbumDirs() {
+  const entries = await fs.readdir(ALBUMS_DIR, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (!findAlbum(entry.name)) {
+      await fs.rm(albumDirectory(entry.name), { recursive: true, force: true }).catch(() => {});
+      continue;
+    }
+    await cleanupEmptyAlbumDir(entry.name);
+  }
+}
+
+/* Transport helpers ---------------------------------------------------- */
+
+function syncAuthHeaders() {
+  return { Authorization: `Bearer ${activeConfig.sync.token}` };
+}
+
+function normalizePeerUrl(raw) {
+  const text = asString(raw, '').trim();
+  if (!text) return '';
+  let value = text;
+  if (!/^https?:\/\//i.test(value)) value = `http://${value}`;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new AppError('同步地址格式不正确，应形如 192.168.1.5:3801。', 400, 'SYNC_PEER_INVALID');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new AppError('同步地址必须使用 http。', 400, 'SYNC_PEER_INVALID');
+  }
+  if (!parsed.port) parsed.port = String(activeConfig.sync.port);
+  return `${parsed.protocol}//${parsed.host}`;
+}
+
+function describeSyncError(error, peerUrl) {
+  if (error?.response?.status === 401) {
+    return new AppError(`口令不一致：请确认两台设备填写的是同一个同步口令（${peerUrl}）。`, 401, 'SYNC_UNAUTHORIZED');
+  }
+  if (error?.code === 'ECONNREFUSED') {
+    return new AppError(`连不上 ${peerUrl}：对方没开同步，或地址/端口不对。`, 502, 'SYNC_UNREACHABLE');
+  }
+  if (error?.code === 'ETIMEDOUT' || error?.code === 'ECONNABORTED') {
+    return new AppError(`连接 ${peerUrl} 超时，请确认两台设备在同一 Wi-Fi。`, 504, 'SYNC_TIMEOUT');
+  }
+  if (error?.response?.status && error?.response?.data?.error) {
+    return new AppError(`对方拒绝：${error.response.data.error}`, 502, 'SYNC_PEER_ERROR');
+  }
+  return error;
+}
+
+async function fetchPeerSnapshot(peerUrl) {
+  const response = await axios.get(`${peerUrl}/sync/snapshot`, {
+    headers: syncAuthHeaders(),
+    timeout: 30_000,
+    maxContentLength: SYNC_SNAPSHOT_LIMIT,
+  });
+  const snapshot = response.data;
+  if (!isPlainObject(snapshot) || !Array.isArray(snapshot.history)) {
+    throw new AppError('对方返回的同步数据无法识别。', 502, 'SYNC_PEER_INVALID');
+  }
+  return snapshot;
+}
+
+async function fetchPeerFile(peerUrl, file) {
+  const query = new URLSearchParams({ kind: file.kind });
+  const response = await axios.get(`${peerUrl}/sync/file/${encodeURIComponent(file.id)}?${query}`, {
+    headers: syncAuthHeaders(),
+    responseType: 'arraybuffer',
+    timeout: 120_000,
+    maxContentLength: SYNC_FILE_LIMIT,
+    maxBodyLength: SYNC_FILE_LIMIT,
+  });
+  const buffer = Buffer.from(response.data);
+  const digest = sha256Hex(buffer);
+  if (file.sha256 && digest !== file.sha256) {
+    throw new AppError(`「${file.filename}」下载后校验失败，请重试。`, 502, 'SYNC_FILE_CORRUPT');
+  }
+  const target = syncIncomingPath(file.kind, file.id);
+  await fs.mkdir(SYNC_INCOMING_DIR, { recursive: true });
+  await fs.writeFile(target, buffer);
+  return target;
+}
+
+async function pushPeerFile(peerUrl, file) {
+  let localPath = '';
+  if (file.kind === 'trash') {
+    const record = trashItems.find(
+      (entry) => (entry.itemId || entry.item?.id) === file.id,
+    );
+    const name = record?.trashFilename || file.trashFilename;
+    if (name) localPath = path.join(TRASH_DIR, name);
+  } else {
+    localPath = imageAbsolutePathForItem(
+      historyItems.find((item) => item.id === file.id) || file,
+    );
+  }
+  if (!localPath || !(await fileExists(localPath))) {
+    throw new AppError(`本机找不到「${file.filename}」，本次同步已停止。`, 500, 'SYNC_FILE_MISSING');
+  }
+  const buffer = await fs.readFile(localPath);
+  const query = new URLSearchParams({ kind: file.kind, filename: file.filename });
+  await axios.put(`${peerUrl}/sync/file/${encodeURIComponent(file.id)}?${query}`, buffer, {
+    headers: {
+      ...syncAuthHeaders(),
+      'Content-Type': 'application/octet-stream',
+      'x-sha256': file.sha256 || sha256Hex(buffer),
+    },
+    timeout: 120_000,
+    maxBodyLength: SYNC_FILE_LIMIT,
+    maxContentLength: SYNC_FILE_LIMIT,
+  });
+}
+
+async function pushPeerApply(peerUrl, snapshot) {
+  await axios.post(`${peerUrl}/sync/apply`, snapshot, {
+    headers: syncAuthHeaders(),
+    timeout: 180_000,
+    maxBodyLength: SYNC_SNAPSHOT_LIMIT,
+    maxContentLength: SYNC_SNAPSHOT_LIMIT,
+  });
+}
+
+function setSyncProgress(phase, message) {
+  syncProgress = { phase, message, startedAt: syncProgress.startedAt || Date.now() };
+}
+
+async function runLibrarySync(rawPeerUrl) {
+  if (syncRunning) {
+    throw new AppError('同步正在进行中，请稍候。', 409, 'SYNC_BUSY');
+  }
+  const peerUrl = normalizePeerUrl(rawPeerUrl || activeConfig.sync.lastPeerUrl);
+  if (!peerUrl) {
+    throw new AppError('请先填写另一台设备的同步地址。', 400, 'SYNC_PEER_REQUIRED');
+  }
+  if (!activeConfig.sync.token || activeConfig.sync.token.length < 6) {
+    throw new AppError('同步口令太短，请在设置里重新生成。', 400, 'SYNC_TOKEN_INVALID');
+  }
+
+  syncRunning = true;
+  syncProgress = { phase: 'prepare', message: '正在读取本机资料…', startedAt: Date.now() };
+  try {
+    const remoteSnapshot = await fetchPeerSnapshot(peerUrl).catch((error) => {
+      throw describeSyncError(error, peerUrl);
+    });
+
+    syncProgress = { ...syncProgress, phase: 'merge', message: '正在比对两边的作品…' };
+    const localSnapshot = await buildSyncSnapshot();
+    const merged = mergeSnapshots(localSnapshot, remoteSnapshot);
+
+    if (merged.download.length > SYNC_MAX_FILES_PER_ROUND) {
+      throw new AppError(
+        `这次需要接收 ${merged.download.length} 个文件，超过单轮上限，请分批同步。`,
+        413,
+        'SYNC_TOO_MANY_FILES',
+      );
+    }
+
+    syncProgress = {
+      ...syncProgress,
+      phase: 'download',
+      message: `正在接收 ${merged.download.length} 个文件…`,
+    };
+    for (const file of merged.download) {
+      await fetchPeerFile(peerUrl, file).catch((error) => {
+        throw describeSyncError(error, peerUrl);
+      });
+    }
+
+    syncProgress = { ...syncProgress, phase: 'apply', message: '正在整理本机资料…' };
+    const applied = await applySyncSnapshot(merged.snapshot);
+
+    syncProgress = {
+      ...syncProgress,
+      phase: 'upload',
+      message: `正在发送 ${merged.upload.length} 个文件…`,
+    };
+    for (const file of merged.upload) {
+      await pushPeerFile(peerUrl, file).catch((error) => {
+        throw describeSyncError(error, peerUrl);
+      });
+    }
+
+    syncProgress = { ...syncProgress, phase: 'peer', message: '正在更新另一台设备…' };
+    await pushPeerApply(peerUrl, merged.snapshot).catch((error) => {
+      throw describeSyncError(error, peerUrl);
+    });
+
+    activeConfig = normalizeConfig({
+      ...activeConfig,
+      sync: { ...activeConfig.sync, lastPeerUrl: peerUrl, lastSyncAt: nowIso() },
+    });
+    await queueWrite(() => atomicWriteJson(CONFIG_FILE, activeConfig));
+
+    syncProgress = { ...syncProgress, phase: 'done', message: '同步完成。' };
+    return {
+      peerUrl,
+      peerDeviceName: asString(remoteSnapshot.deviceName, ''),
+      ...merged.stats,
+      warnings: merged.warnings,
+      downloaded: merged.download.length,
+      uploaded: merged.upload.length,
+      applied,
+    };
+  } finally {
+    syncRunning = false;
+  }
+}
+
+/* Sync HTTP endpoint (LAN, token required) ----------------------------- */
+
+function syncTokenMatches(headerValue) {
+  const expected = `Bearer ${activeConfig.sync.token}`;
+  const actual = asString(headerValue, '');
+  if (actual.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
+function createSyncApp() {
+  const syncApp = express();
+  syncApp.disable('x-powered-by');
+  syncApp.use((req, res, next) => {
+    if (!syncTokenMatches(req.get('authorization'))) {
+      res.status(401).json({ error: '同步口令不正确。' });
+      return;
+    }
+    next();
+  });
+
+  syncApp.get('/sync/ping', (req, res) => {
+    res.json({
+      ok: true,
+      version: APP_VERSION,
+      deviceName: activeConfig.sync.deviceName,
+      protocol: SNAPSHOT_VERSION,
+    });
+  });
+
+  syncApp.get(
+    '/sync/snapshot',
+    asyncRoute(async (req, res) => {
+      res.json(await buildSyncSnapshot());
+    }),
+  );
+
+  syncApp.get(
+    '/sync/file/:id',
+    asyncRoute(async (req, res) => {
+      const id = asString(req.params.id, '');
+      const kind = req.query.kind === 'trash' ? 'trash' : 'image';
+      let absolute = '';
+      if (kind === 'trash') {
+        const record = trashItems.find((entry) => (entry.itemId || entry.item?.id) === id);
+        if (record) absolute = path.join(TRASH_DIR, record.trashFilename);
+      } else {
+        const item = historyItems.find((entry) => entry.id === id);
+        if (item) absolute = imageAbsolutePathForItem(item);
+      }
+      if (!absolute || !(await fileExists(absolute))) {
+        throw new AppError('这台设备上没有这个文件。', 404, 'SYNC_FILE_NOT_FOUND');
+      }
+      const stat = await fs.stat(absolute);
+      const sha256 = await syncFileSha256(absolute, stat);
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('x-sha256', sha256);
+      res.send(await fs.readFile(absolute));
+    }),
+  );
+
+  syncApp.put(
+    '/sync/file/:id',
+    express.raw({ type: () => true, limit: '64mb' }),
+    asyncRoute(async (req, res) => {
+      const id = asString(req.params.id, '');
+      const kind = req.query.kind === 'trash' ? 'trash' : 'image';
+      if (!/^[a-z0-9][a-z0-9_-]{7,79}$/i.test(id)) {
+        throw new AppError('文件 ID 无效。', 400, 'SYNC_ID_INVALID');
+      }
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (body.length === 0) throw new AppError('收到的文件为空。', 400, 'SYNC_FILE_EMPTY');
+      if (body.length > SYNC_FILE_LIMIT) {
+        throw new AppError('文件超过大小上限。', 413, 'SYNC_FILE_TOO_LARGE');
+      }
+      const expected = asString(req.get('x-sha256'), '');
+      if (expected && sha256Hex(body) !== expected) {
+        throw new AppError('文件校验失败，请重试。', 400, 'SYNC_FILE_CORRUPT');
+      }
+      await fs.mkdir(SYNC_INCOMING_DIR, { recursive: true });
+      await fs.writeFile(syncIncomingPath(kind, id), body);
+      res.json({ ok: true, bytes: body.length });
+    }),
+  );
+
+  syncApp.post(
+    '/sync/apply',
+    express.json({ limit: '8mb' }),
+    asyncRoute(async (req, res) => {
+      const result = await applySyncSnapshot(req.body);
+      res.json({ ok: true, ...result });
+    }),
+  );
+
+  syncApp.use((req, res) => res.status(404).json({ error: '未知的同步接口。' }));
+  syncApp.use((error, req, res, next) => {
+    if (res.headersSent) {
+      next(error);
+      return;
+    }
+    const status = error instanceof AppError ? error.status : 500;
+    res.status(status).json({ error: error?.message || '同步请求失败。' });
+  });
+  return syncApp;
+}
+
+function stopSyncServer() {
+  if (syncServerHandle) {
+    try {
+      syncServerHandle.close();
+    } catch (error) {
+      console.warn('[sync] 关闭同步端口失败：', error.message);
+    }
+    syncServerHandle = null;
+  }
+}
+
+function startSyncServer() {
+  stopSyncServer();
+  syncServerError = '';
+  const settings = activeConfig.sync;
+  if (!settings.enabled) return;
+
+  const syncApp = createSyncApp();
+  const server = syncApp.listen(settings.port, '0.0.0.0', () => {
+    syncServerHandle = server;
+    console.log(`[sync] 同步端口已打开：0.0.0.0:${settings.port}（需要口令）`);
+  });
+  server.on('error', (error) => {
+    syncServerError =
+      error.code === 'EADDRINUSE'
+        ? `同步端口 ${settings.port} 被占用，请换一个端口。`
+        : `同步服务启动失败：${error.message}`;
+    console.error(`[sync] ${syncServerError}`);
+    try {
+      server.close();
+    } catch {
+      // Already closed.
+    }
+  });
+}
+
+function localAddresses() {
+  const result = [];
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const info of interfaces[name] || []) {
+      if (info.family === 'IPv4' && !info.internal) result.push(info.address);
+    }
+  }
+  return result;
+}
+
+function syncStatus() {
+  const settings = activeConfig.sync;
+  return {
+    enabled: settings.enabled,
+    port: settings.port,
+    token: settings.token,
+    deviceName: settings.deviceName,
+    lastPeerUrl: settings.lastPeerUrl,
+    lastSyncAt: settings.lastSyncAt,
+    running: syncRunning,
+    progress: syncRunning ? syncProgress : null,
+    serverError: syncServerError,
+    addresses: localAddresses(),
+  };
+}
+
 
 function emitStage(onStage, payload) {
   try {
@@ -2763,6 +3612,7 @@ function makeHistoryRecord({
   startedAt,
 }) {
   const safeRelativePath = relativePath || relativePathForAlbum(albumId, filename);
+  const createdAt = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
     filename,
@@ -2788,7 +3638,8 @@ function makeHistoryRecord({
     qualityToggle: novai.qualityToggle,
     llmProvider,
     llmModel,
-    createdAt: new Date().toISOString(),
+    createdAt,
+    updatedAt: createdAt,
     elapsedMs: Date.now() - startedAt,
   };
 }
@@ -3524,6 +4375,64 @@ app.post(
   }),
 );
 
+app.get('/api/sync/status', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ status: syncStatus() });
+});
+
+app.post(
+  '/api/sync/settings',
+  asyncRoute(async (req, res) => {
+    const incoming = isPlainObject(req.body) ? req.body : {};
+    const current = activeConfig.sync;
+    const next = normalizeSyncSettings({
+      ...current,
+      enabled: typeof incoming.enabled === 'boolean' ? incoming.enabled : current.enabled,
+      port: incoming.port === undefined ? current.port : incoming.port,
+      deviceName: incoming.deviceName === undefined ? current.deviceName : incoming.deviceName,
+      token: incoming.regenerateToken ? '' : incoming.token === undefined ? current.token : incoming.token,
+    });
+    activeConfig = normalizeConfig({ ...activeConfig, sync: next });
+    await queueWrite(() => atomicWriteJson(CONFIG_FILE, activeConfig));
+    startSyncServer();
+    res.json({ config: clone(activeConfig.sync), status: syncStatus() });
+  }),
+);
+
+app.post(
+  '/api/sync/run',
+  asyncRoute(async (req, res) => {
+    const peerUrl = isPlainObject(req.body) ? req.body.peerUrl : '';
+    const result = await runLibrarySync(peerUrl);
+    res.json({ result, status: syncStatus() });
+  }),
+);
+
+app.post(
+  '/api/sync/peer-check',
+  asyncRoute(async (req, res) => {
+    const peerUrl = normalizePeerUrl(isPlainObject(req.body) ? req.body.peerUrl : '');
+    if (!peerUrl) throw new AppError('请先填写另一台设备的地址。', 400, 'SYNC_PEER_REQUIRED');
+    let payload;
+    try {
+      const response = await axios.get(`${peerUrl}/sync/ping`, {
+        headers: syncAuthHeaders(),
+        timeout: 8_000,
+      });
+      payload = response.data;
+    } catch (error) {
+      throw describeSyncError(error, peerUrl);
+    }
+    res.json({
+      ok: true,
+      peerUrl,
+      deviceName: asString(payload?.deviceName, ''),
+      version: asString(payload?.version, ''),
+      protocol: payload?.protocol,
+    });
+  }),
+);
+
 app.get(
   '/api/history',
   asyncRoute(async (req, res) => {
@@ -4110,6 +5019,7 @@ async function bootstrap() {
       console.log(`  Outputs   ${OUTPUTS_DIR}`);
       console.log('  Press Ctrl+C to stop.');
       console.log('');
+      startSyncServer();
       resolve(server);
     });
 
