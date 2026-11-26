@@ -1,0 +1,19 @@
+# Secrets and generated content
+data/config.json
+data/history.json
+data/albums.json
+data/trash.json
+data/prompts.json
+outputs/*
+!outputs/.gitkeep
+
+# Dependencies
+node_modules/
+
+# Logs / OS files
+*.log
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
