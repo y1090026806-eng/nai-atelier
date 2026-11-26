@@ -69,6 +69,8 @@
   const GALLERY_DENSITY_KEY = 'nai-atelier.gallery-density';
   const GALLERY_VIEW_KEY = 'nai-atelier.gallery-view';
   const SIDEBAR_COLLAPSED_KEY = 'nai-atelier.sidebar-collapsed';
+  const MOBILE_TAB_KEY = 'nai-atelier.mobile-tab';
+  const MOBILE_TABS = ['gallery', 'generate', 'queue', 'settings'];
 
   const RESOLUTION_PRESETS = {
     portrait: { width: 832, height: 1216 },
@@ -130,6 +132,7 @@
     focusMode: false,
     composerExpanded: false,
     queueCollapsed: false,
+    mobileTab: 'gallery',
   };
 
   const ui = {};
@@ -349,12 +352,39 @@
       'sync-last',
       'sync-status',
       'toast-stack',
+      'm-topbar',
+      'm-album-btn',
+      'm-album-label',
+      'm-count',
+      'm-view-btn',
+      'm-more-btn',
+      'm-composer-head',
+      'm-open-settings',
+      'm-recent',
+      'm-tabbar',
+      'm-tab-badge',
+      'm-queue-page',
+      'm-queue-list',
+      'm-queue-count',
+      'm-queue-cancel-all',
+      'm-queue-empty',
+      'm-queue-go',
+      'm-album-sheet',
+      'm-album-list',
+      'm-album-sheet-close',
+      'm-album-new',
+      'm-album-rename',
+      'm-album-delete',
+      'm-actions-sheet',
+      'm-actions-close',
     ];
 
     for (const id of ids) {
       const key = id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
       ui[key] = document.getElementById(id);
     }
+
+    ui.mTabButtons = [...document.querySelectorAll('#m-tabbar [data-tab]')];
   }
 
   /* ---------------------------------------------------------------------- */
@@ -362,6 +392,7 @@
   /* ---------------------------------------------------------------------- */
 
   function defaultGalleryDensity() {
+    if (isMobileLayout()) return 'detailed';
     return window.innerWidth <= 680 || window.innerHeight < 780
       ? 'compact'
       : 'detailed';
@@ -415,6 +446,7 @@
       records ? '当前记录视图，切换到图片视图' : '当前图片视图，切换到记录视图',
     );
     ui.galleryTitle.textContent = records ? '创作记录' : '历史作品';
+    updateMobileViewButton();
     if (persist) writePreference(GALLERY_VIEW_KEY, state.viewMode);
     if (records) {
       state.selected.clear();
@@ -498,6 +530,289 @@
     ui.queuePanel.classList.toggle('is-collapsed', state.queueCollapsed);
     ui.queueToggle.textContent = state.queueCollapsed ? '展开' : '收起';
     ui.queueToggle.setAttribute('aria-expanded', String(!state.queueCollapsed));
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Mobile shell (bottom tabs)                                             */
+  /* ---------------------------------------------------------------------- */
+
+  function isMobileLayout() {
+    return window.innerWidth <= 900;
+  }
+
+  function mobileTabFromHash() {
+    const value = window.location.hash.replace(/^#/, '');
+    return MOBILE_TABS.includes(value) ? value : '';
+  }
+
+  function setMobileTab(tab, { persist = true, syncHash = true } = {}) {
+    const next = MOBILE_TABS.includes(tab) ? tab : 'gallery';
+    state.mobileTab = next;
+    document.body.dataset.mobileTab = next;
+
+    for (const button of ui.mTabButtons || []) {
+      const active = button.dataset.tab === next;
+      button.classList.toggle('is-active', active);
+      if (active) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
+    }
+
+    if (next !== 'settings' && ui.sidebar.classList.contains('is-open')) {
+      setSidebar(false);
+    }
+    if (next !== 'gallery') {
+      if (document.body.classList.contains('is-selecting')) setMobileSelecting(false);
+      if (state.selected.size > 0) clearSelection();
+    }
+    closeMobileSheet(ui.mAlbumSheet);
+    closeMobileSheet(ui.mActionsSheet);
+    if (next === 'queue') renderQueue();
+    if (next === 'generate') updateComposerMetrics();
+    if (persist) writePreference(MOBILE_TAB_KEY, next);
+
+    if (syncHash && isMobileLayout()) {
+      const hash = `#${next}`;
+      if (window.location.hash !== hash) {
+        try {
+          window.history.pushState(null, '', hash);
+        } catch {
+          window.location.hash = next;
+        }
+      }
+    }
+  }
+
+  function initMobileTab() {
+    const fromHash = mobileTabFromHash();
+    const stored = readPreference(MOBILE_TAB_KEY);
+    const initial = fromHash || (MOBILE_TABS.includes(stored) ? stored : 'gallery');
+    setMobileTab(initial, { persist: false, syncHash: false });
+    updateMobileAlbumLabel();
+    updateMobileViewButton();
+  }
+
+  function openMobileSheet(dialog, trigger = null) {
+    if (!dialog || dialog.open) return;
+    try {
+      dialog.showModal();
+    } catch {
+      return;
+    }
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+  }
+
+  function closeMobileSheet(dialog) {
+    if (dialog && dialog.open) dialog.close();
+    if (ui.mAlbumBtn) ui.mAlbumBtn.setAttribute('aria-expanded', 'false');
+    if (ui.mMoreBtn) ui.mMoreBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  function updateMobileViewButton() {
+    if (!ui.mViewBtn) return;
+    const records = state.viewMode === 'records';
+    ui.mViewBtn.classList.toggle('is-active', records);
+    const label = records
+      ? '当前：记录视图（点击切换全部图片）'
+      : '当前：图片视图（点击切换记录分组）';
+    ui.mViewBtn.setAttribute('aria-label', label);
+    ui.mViewBtn.title = label;
+  }
+
+  function mobileAlbumTitle() {
+    if (state.activeAlbumId === 'uncategorized') return '未分类';
+    if (state.activeAlbumId === 'all') return '全部作品';
+    return albumName(state.activeAlbumId);
+  }
+
+  function updateMobileAlbumLabel() {
+    if (!ui.mAlbumLabel) return;
+    ui.mAlbumLabel.textContent = mobileAlbumTitle();
+    if (ui.mAlbumBtn) {
+      ui.mAlbumBtn.setAttribute('aria-label', `切换画册，当前：${mobileAlbumTitle()}`);
+    }
+  }
+
+  function mobileAlbumCover(entry) {
+    if (entry.album?.coverUrl) return entry.album.coverUrl;
+    if (entry.id === 'all') return state.history[0]?.url || '';
+    if (entry.id === 'uncategorized') {
+      return state.history.find((item) => !item.albumId)?.url || '';
+    }
+    return state.history.find((item) => item.albumId === entry.id)?.url || '';
+  }
+
+  function renderMobileAlbumSheet() {
+    if (!ui.mAlbumList) return;
+    const entries = [
+      { id: 'all', name: '全部作品', count: state.history.length },
+      {
+        id: 'uncategorized',
+        name: '未分类',
+        count: state.history.filter((item) => !item.albumId).length,
+      },
+      ...state.albums.map((album) => ({
+        id: album.id,
+        name: album.name,
+        count: state.history.filter((item) => item.albumId === album.id).length,
+        album,
+      })),
+    ];
+
+    const fragment = document.createDocumentFragment();
+    for (const entry of entries) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'm-album-row';
+      const active = state.activeAlbumId === entry.id;
+      row.classList.toggle('is-active', active);
+      row.setAttribute('aria-pressed', String(active));
+
+      const coverUrl = mobileAlbumCover(entry);
+      if (coverUrl) {
+        const cover = document.createElement('img');
+        cover.className = 'm-album-cover';
+        cover.src = coverUrl;
+        cover.alt = '';
+        cover.loading = 'lazy';
+        cover.decoding = 'async';
+        row.append(cover);
+      } else {
+        const cover = document.createElement('span');
+        cover.className = 'm-album-cover m-album-cover--empty';
+        cover.textContent = '—';
+        cover.setAttribute('aria-hidden', 'true');
+        row.append(cover);
+      }
+
+      const copy = document.createElement('span');
+      copy.className = 'm-album-copy';
+      const name = document.createElement('span');
+      name.className = 'm-album-name';
+      name.textContent = entry.name;
+      const sub = document.createElement('span');
+      sub.className = 'm-album-sub';
+      sub.textContent = `${entry.count} 张`;
+      copy.append(name, sub);
+
+      const check = document.createElement('span');
+      check.className = 'm-album-check';
+      check.innerHTML =
+        '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4.5 10.4l3.6 3.6 7.4-8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+      row.append(copy, check);
+      row.addEventListener('click', () => {
+        state.activeAlbumId = entry.id;
+        renderAlbums();
+        renderGallery();
+        closeMobileSheet(ui.mAlbumSheet);
+        ui.galleryScroll.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+      fragment.append(row);
+    }
+    ui.mAlbumList.replaceChildren(fragment);
+  }
+
+  function openMobileAlbumSheet() {
+    updateMobileAlbumLabel();
+    renderMobileAlbumSheet();
+    openMobileSheet(ui.mAlbumSheet, ui.mAlbumBtn);
+  }
+
+  function renderMobileRecent() {
+    if (!ui.mRecent) return;
+    const items = state.history.slice(0, 12);
+    if (items.length === 0) {
+      ui.mRecent.hidden = true;
+      ui.mRecent.replaceChildren();
+      return;
+    }
+    ui.mRecent.hidden = false;
+    const fragment = document.createDocumentFragment();
+    for (const item of items) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'm-recent-item';
+      button.setAttribute('aria-label', '查看最近一张作品');
+      const image = document.createElement('img');
+      image.src = item.url;
+      image.alt = '';
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.draggable = false;
+      button.append(image);
+      button.addEventListener('click', () => openLightbox(item));
+      fragment.append(button);
+    }
+    ui.mRecent.replaceChildren(fragment);
+  }
+
+  function runMobileAction(action) {
+    closeMobileSheet(ui.mActionsSheet);
+    switch (action) {
+      case 'view':
+        toggleGalleryView();
+        break;
+      case 'density':
+        toggleGalleryDensity();
+        break;
+      case 'select': {
+        const enabling = !document.body.classList.contains('is-selecting');
+        if (enabling && state.viewMode === 'records') {
+          applyGalleryView('images', { persist: true });
+        }
+        setMobileSelecting(enabling);
+        break;
+      }
+      case 'prompts':
+        openPromptDialog();
+        break;
+      case 'trash':
+        openTrashDialog();
+        break;
+      case 'sync':
+        openSyncDialog();
+        break;
+      case 'metadata':
+        handleExportMetadata();
+        break;
+      case 'clear':
+        handleClearGallery();
+        break;
+      case 'refresh':
+        handleRefreshHistory();
+        break;
+      default:
+        break;
+    }
+  }
+
+  function setMobileSelecting(active) {
+    const next = Boolean(active);
+    document.body.classList.toggle('is-selecting', next);
+    if (ui.mMoreBtn) ui.mMoreBtn.classList.toggle('is-active', next);
+    if (next && state.selected.size === 0) {
+      showToast('点按作品可多选，再通过底栏移动或删除。', 'info', 3600);
+    }
+  }
+
+  function renderMobileActions() {
+    if (!ui.mActionsSheet) return;
+    const viewButton = ui.mActionsSheet.querySelector('[data-m-action="view"]');
+    const densityButton = ui.mActionsSheet.querySelector('[data-m-action="density"]');
+    const selectButton = ui.mActionsSheet.querySelector('[data-m-action="select"]');
+    if (viewButton) {
+      viewButton.textContent =
+        state.viewMode === 'records' ? '切换到图片视图' : '切换到记录视图';
+    }
+    if (densityButton) {
+      densityButton.textContent =
+        state.galleryDensity === 'compact' ? '切换到详细卡片' : '切换到紧凑图墙';
+    }
+    if (selectButton) {
+      const selecting = document.body.classList.contains('is-selecting');
+      selectButton.textContent = selecting ? '退出多选' : '选择作品（多选）';
+      selectButton.classList.toggle('m-action--active', selecting);
+    }
   }
 
   /* ---------------------------------------------------------------------- */
@@ -2039,6 +2354,11 @@
         : '在 outputs/albums 下新建一个画册文件夹';
 
     renderSelectionAlbumOptions();
+    updateMobileAlbumLabel();
+    renderMobileAlbumSheet();
+    if (ui.mAlbumNew) ui.mAlbumNew.disabled = state.albums.length >= 60;
+    if (ui.mAlbumRename) ui.mAlbumRename.disabled = !album;
+    if (ui.mAlbumDelete) ui.mAlbumDelete.disabled = !album;
   }
 
   function renderSelectionAlbumOptions() {
@@ -2079,6 +2399,7 @@
   }
 
   function renderGallery() {
+    renderMobileRecent();
     if (state.viewMode === 'records') {
       renderRecordGallery();
       return;
@@ -2223,6 +2544,7 @@
     state.history.unshift(normalized);
 
     renderAlbums();
+    renderMobileRecent();
     if (state.viewMode === 'records') return;
 
     ui.galleryEmpty.hidden = true;
@@ -2248,6 +2570,7 @@
           ? `${visible.length} 条记录 · ${imageTotal} 张图`
           : `${visible.length} / ${state.records.length} 条记录`;
       ui.galleryCount.title = '当前视图按原始输入分组';
+      if (ui.mCount) ui.mCount.textContent = `${visible.length} 条`;
       return;
     }
     const visible = visibleHistory().length;
@@ -2255,6 +2578,7 @@
       state.activeAlbumId === 'all'
         ? `${visible} 张`
         : `${visible} / ${state.history.length} 张`;
+    if (ui.mCount) ui.mCount.textContent = `${visible} 张`;
     ui.galleryCount.title = activeAlbum()
       ? `当前画册：${activeAlbum().name}`
       : state.activeAlbumId === 'uncategorized'
@@ -4240,7 +4564,7 @@
   }
 
   function focusField(field) {
-    if (window.innerWidth <= 900) setSidebar(true, { focusClose: false });
+    if (window.innerWidth <= 900) setMobileTab('settings');
     window.requestAnimationFrame(() => {
       field.scrollIntoView({ behavior: 'smooth', block: 'center' });
       field.focus();
@@ -4590,6 +4914,93 @@
     return job.error?.message || '失败';
   }
 
+  function createQueueRow(job) {
+    const row = document.createElement('div');
+    row.className = 'queue-item';
+    row.dataset.status = job.status;
+    row.dataset.id = job.id;
+
+    const dot = document.createElement('span');
+    dot.className = 'queue-item-dot';
+    dot.setAttribute('aria-hidden', 'true');
+
+    const main = document.createElement('div');
+    main.className = 'queue-item-main';
+
+    const top = document.createElement('div');
+    top.className = 'queue-item-row';
+
+    const label = document.createElement('span');
+    label.className = 'queue-item-label';
+    label.textContent =
+      job.kind === 'rerender'
+        ? '重画'
+        : job.kind === 'reroll'
+          ? '重 Roll'
+          : job.kind === 'render'
+            ? '记录生图'
+            : '文生图';
+
+    const text = document.createElement('span');
+    text.className = 'queue-item-text';
+    text.textContent =
+      job.kind === 'rerender'
+        ? '历史作品重画'
+        : job.kind === 'reroll'
+          ? '重新生成 Tag 版本'
+          : job.kind === 'render'
+            ? '按已有 Tag 版本生图'
+            : job.text || '（无描述）';
+    text.title = job.text || text.textContent;
+    top.append(label, text);
+
+    const bar = document.createElement('div');
+    bar.className = 'queue-item-bar';
+    const fill = document.createElement('span');
+    fill.className = 'queue-item-fill';
+    const progressValue =
+      job.status === 'done' ? 100 : Math.min(100, Math.max(0, job.progress || 0));
+    fill.style.width = `${progressValue}%`;
+    bar.append(fill);
+
+    const metaRow = document.createElement('div');
+    metaRow.className = 'queue-item-meta';
+
+    const statusText = document.createElement('span');
+    statusText.className = 'queue-item-status';
+    statusText.textContent = queueStatusText(job);
+    statusText.title = statusText.textContent;
+
+    const time = document.createElement('span');
+    time.className = 'queue-item-time';
+    time.textContent =
+      job.status === 'queued'
+        ? `第 ${job.position || 1} 位`
+        : formatDuration(job.elapsedMs);
+    metaRow.append(statusText, time);
+
+    main.append(top, bar, metaRow);
+
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'mini-btn queue-item-cancel';
+    if (isActiveJob(job)) {
+      action.textContent = job.status === 'running' ? '取消' : '移除';
+      action.title =
+        job.status === 'running'
+          ? '中止当前生成请求'
+          : '从排队中移除这个任务';
+      action.addEventListener('click', () => cancelJob(job.id));
+    } else {
+      action.textContent = '关闭';
+      action.title = '从任务列表移除这条已结束的记录';
+      action.addEventListener('click', () => dismissJob(job.id));
+    }
+
+    row.append(dot, main, action);
+    return row;
+  }
+
   function renderQueue() {
     const active = state.jobs.filter(isActiveJob);
     // Only list finished jobs that belong to this page session: older queue
@@ -4616,94 +5027,23 @@
     ui.queueCancelAll.disabled = queuedCount === 0;
 
     const fragment = document.createDocumentFragment();
-    for (const job of rows) {
-      const row = document.createElement('div');
-      row.className = 'queue-item';
-      row.dataset.status = job.status;
-      row.dataset.id = job.id;
-
-      const dot = document.createElement('span');
-      dot.className = 'queue-item-dot';
-      dot.setAttribute('aria-hidden', 'true');
-
-      const main = document.createElement('div');
-      main.className = 'queue-item-main';
-
-      const top = document.createElement('div');
-      top.className = 'queue-item-row';
-
-      const label = document.createElement('span');
-      label.className = 'queue-item-label';
-      label.textContent =
-        job.kind === 'rerender'
-          ? '重画'
-          : job.kind === 'reroll'
-            ? '重 Roll'
-            : job.kind === 'render'
-              ? '记录生图'
-              : '文生图';
-
-      const text = document.createElement('span');
-      text.className = 'queue-item-text';
-      text.textContent =
-        job.kind === 'rerender'
-          ? '历史作品重画'
-          : job.kind === 'reroll'
-            ? '重新生成 Tag 版本'
-            : job.kind === 'render'
-              ? '按已有 Tag 版本生图'
-              : job.text || '（无描述）';
-      text.title = job.text || text.textContent;
-      top.append(label, text);
-
-      const bar = document.createElement('div');
-      bar.className = 'queue-item-bar';
-      const fill = document.createElement('span');
-      fill.className = 'queue-item-fill';
-      const progressValue =
-        job.status === 'done' ? 100 : Math.min(100, Math.max(0, job.progress || 0));
-      fill.style.width = `${progressValue}%`;
-      bar.append(fill);
-
-      const metaRow = document.createElement('div');
-      metaRow.className = 'queue-item-meta';
-
-      const statusText = document.createElement('span');
-      statusText.className = 'queue-item-status';
-      statusText.textContent = queueStatusText(job);
-      statusText.title = statusText.textContent;
-
-      const time = document.createElement('span');
-      time.className = 'queue-item-time';
-      time.textContent =
-        job.status === 'queued'
-          ? `第 ${job.position || 1} 位`
-          : formatDuration(job.elapsedMs);
-      metaRow.append(statusText, time);
-
-      main.append(top, bar, metaRow);
-
-      const action = document.createElement('button');
-      action.type = 'button';
-      action.className = 'mini-btn queue-item-cancel';
-      if (isActiveJob(job)) {
-        action.textContent = job.status === 'running' ? '取消' : '移除';
-        action.title =
-          job.status === 'running'
-            ? '中止当前生成请求'
-            : '从排队中移除这个任务';
-        action.addEventListener('click', () => cancelJob(job.id));
-      } else {
-        action.textContent = '关闭';
-        action.title = '从任务列表移除这条已结束的记录';
-        action.addEventListener('click', () => dismissJob(job.id));
-      }
-
-      row.append(dot, main, action);
-      fragment.append(row);
-    }
-
+    for (const job of rows) fragment.append(createQueueRow(job));
     ui.queueList.replaceChildren(fragment);
+    renderMobileQueue(rows, active.length, queuedCount);
+  }
+
+  function renderMobileQueue(rows, activeCount, queuedCount) {
+    if (!ui.mTabBadge || !ui.mQueueList) return;
+    ui.mTabBadge.hidden = activeCount === 0;
+    ui.mTabBadge.textContent = String(activeCount);
+    ui.mQueueCount.textContent = activeCount > 0 ? `${activeCount} 个进行中` : '空闲';
+    ui.mQueueCancelAll.hidden = queuedCount === 0;
+    ui.mQueueCancelAll.disabled = queuedCount === 0;
+    ui.mQueueEmpty.hidden = rows.length > 0;
+
+    const fragment = document.createDocumentFragment();
+    for (const job of rows) fragment.append(createQueueRow(job));
+    ui.mQueueList.replaceChildren(fragment);
   }
 
   async function enqueueGenerationJob(spec) {
@@ -4778,9 +5118,14 @@
       input.style.height = '';
       return;
     }
-    const compactCap = window.innerHeight <= 720 ? 96 : 128;
+    const mobile = isMobileLayout();
+    const compactCap = mobile
+      ? Math.round(window.innerHeight * 0.34)
+      : window.innerHeight <= 720
+        ? 96
+        : 128;
     const cap = state.composerExpanded
-      ? Math.min(window.innerHeight * 0.46, 520)
+      ? Math.min(window.innerHeight * (mobile ? 0.56 : 0.46), mobile ? 560 : 520)
       : compactCap;
     input.style.height = 'auto';
     input.style.height = `${Math.min(input.scrollHeight, cap)}px`;
@@ -5201,6 +5546,56 @@
       state.activeItem = null;
     });
 
+    // Mobile shell: bottom tabs, sheets and hash routing.
+    for (const button of ui.mTabButtons) {
+      button.addEventListener('click', () => setMobileTab(button.dataset.tab || 'gallery'));
+    }
+    ui.mAlbumBtn.addEventListener('click', openMobileAlbumSheet);
+    ui.mViewBtn.addEventListener('click', toggleGalleryView);
+    ui.mMoreBtn.addEventListener('click', () => {
+      renderMobileActions();
+      openMobileSheet(ui.mActionsSheet, ui.mMoreBtn);
+    });
+    ui.mOpenSettings.addEventListener('click', () => setMobileTab('settings'));
+    ui.mQueueGo.addEventListener('click', () => setMobileTab('generate'));
+    ui.mQueueCancelAll.addEventListener('click', cancelAllQueuedJobs);
+    ui.mAlbumSheetClose.addEventListener('click', () => closeMobileSheet(ui.mAlbumSheet));
+    ui.mActionsClose.addEventListener('click', () => closeMobileSheet(ui.mActionsSheet));
+    ui.mAlbumSheet.addEventListener('click', (event) => {
+      if (event.target === ui.mAlbumSheet) closeMobileSheet(ui.mAlbumSheet);
+    });
+    ui.mActionsSheet.addEventListener('click', (event) => {
+      if (event.target === ui.mActionsSheet) closeMobileSheet(ui.mActionsSheet);
+    });
+    ui.mAlbumSheet.addEventListener('close', () => {
+      ui.mAlbumBtn.setAttribute('aria-expanded', 'false');
+    });
+    ui.mActionsSheet.addEventListener('close', () => {
+      ui.mMoreBtn.setAttribute('aria-expanded', 'false');
+    });
+    ui.mActionsSheet.querySelectorAll('[data-m-action]').forEach((button) => {
+      button.addEventListener('click', () => runMobileAction(button.dataset.mAction || ''));
+    });
+    ui.mAlbumNew.addEventListener('click', () => {
+      closeMobileSheet(ui.mAlbumSheet);
+      handleCreateAlbum();
+    });
+    ui.mAlbumRename.addEventListener('click', () => {
+      closeMobileSheet(ui.mAlbumSheet);
+      handleRenameAlbum();
+    });
+    ui.mAlbumDelete.addEventListener('click', () => {
+      closeMobileSheet(ui.mAlbumSheet);
+      handleDeleteAlbum();
+    });
+    window.addEventListener('hashchange', () => {
+      if (!isMobileLayout()) return;
+      const tab = mobileTabFromHash() || 'gallery';
+      if (tab !== state.mobileTab) {
+        setMobileTab(tab, { persist: false, syncHash: false });
+      }
+    });
+
     // Drawer / desktop rail.
     ui.sidebarToggle.addEventListener('click', () => {
       if (window.innerWidth > 900) {
@@ -5210,13 +5605,25 @@
       }
     });
     ui.focusToggle.addEventListener('click', () => setFocusMode(!state.focusMode));
-    ui.sidebarClose.addEventListener('click', () => setSidebar(false));
-    ui.sidebarBackdrop.addEventListener('click', () => setSidebar(false));
+    ui.sidebarClose.addEventListener('click', () => {
+      if (isMobileLayout()) setMobileTab('gallery');
+      else setSidebar(false);
+    });
+    ui.sidebarBackdrop.addEventListener('click', () => {
+      if (isMobileLayout()) setMobileTab('gallery');
+      else setSidebar(false);
+    });
     updateSidebarToggleLabel();
 
     window.addEventListener('resize', () => {
       if (window.innerWidth > 900 && ui.sidebar.classList.contains('is-open')) {
         setSidebar(false);
+      }
+      if (!isMobileLayout()) {
+        closeMobileSheet(ui.mAlbumSheet);
+        closeMobileSheet(ui.mActionsSheet);
+      } else {
+        updateMobileAlbumLabel();
       }
       updateSidebarToggleLabel();
       if (!state.galleryDensityManual) {
@@ -5266,6 +5673,10 @@
       }
       if (event.key === 'Escape' && !ui.lightbox.open && state.composerExpanded) {
         setComposerExpanded(false);
+        return;
+      }
+      if (event.key === 'Escape' && isMobileLayout() && state.mobileTab === 'settings') {
+        setMobileTab('gallery');
       }
     });
   }
@@ -5276,6 +5687,7 @@
 
   async function init() {
     cacheElements();
+    initMobileTab();
     initLayoutPreferences();
     setModelSuggestions(MODEL_SUGGESTIONS);
     renderPromptBlocks();

@@ -29,7 +29,7 @@ const {
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
