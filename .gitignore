@@ -1,6 +1,7 @@
 # Secrets and generated content
 data/config.json
 data/history.json
+data/records.json
 data/albums.json
 data/trash.json
 data/prompts.json

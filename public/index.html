@@ -8,14 +8,14 @@
   <meta name="description" content="本地运行的 LLM Tags × NovelAI 创作工作台">
   <title>NAI Atelier · LLM × NovelAI</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%231e1e2e'/%3E%3Cpath d='M32 9l5 18 18 5-18 5-5 18-5-18-18-5 18-5z' fill='%23cba6f7'/%3E%3Ccircle cx='46' cy='17' r='3' fill='%2389b4fa'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/style.css?v=1.7.0">
+  <link rel="stylesheet" href="/style.css?v=1.8.0">
 </head>
 <body>
   <div class="ambient ambient--lavender" aria-hidden="true"></div>
   <div class="ambient ambient--blue" aria-hidden="true"></div>
   <div class="ambient ambient--grain" aria-hidden="true"></div>
 
-  <div class="app-shell">
+  <div class="app-shell" id="app-shell">
     <!-- Left configuration rail ------------------------------------------------ -->
     <aside class="sidebar glass-panel" id="sidebar" aria-label="配置侧边栏">
       <header class="sidebar-head">
@@ -158,6 +158,11 @@
             <button type="button" class="mini-btn" id="nai-preset-delete" title="删除当前选中的预设" disabled>删除</button>
           </div>
           <p class="field-help preset-help">预设保存模型、采样参数、尺寸、Seed 与提示词，切换后记得保存配置。</p>
+          <div class="preset-io-row">
+            <button type="button" class="mini-btn" id="nai-preset-export" title="把全部 NovelAI 预设导出为 JSON（不含 API Key）">导出预设</button>
+            <button type="button" class="mini-btn" id="nai-preset-import" title="从 JSON 导入 NovelAI 预设">导入预设</button>
+            <input type="file" id="nai-preset-file" accept=".json,application/json" hidden>
+          </div>
 
           <div class="field">
             <div class="label-row">
@@ -327,6 +332,9 @@
             <div class="label-row">
               <label for="base-positive">基础正向提示词</label>
               <span class="field-hint">Base positive</span>
+              <button type="button" class="prompt-pencil" data-editor-target="base-positive" aria-label="放大编辑基础正向提示词" title="放大编辑">
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 11.2V13h1.8l7.3-7.3-1.8-1.8L3 11.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M9.6 4.6l1.8 1.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              </button>
             </div>
             <textarea id="base-positive" rows="3" spellcheck="false" placeholder="例如：cinematic lighting, detailed background, from below"></textarea>
           </div>
@@ -335,6 +343,9 @@
             <div class="label-row">
               <label for="artist-prompt">画师串</label>
               <span class="field-hint">Artist tags</span>
+              <button type="button" class="prompt-pencil" data-editor-target="artist-prompt" aria-label="放大编辑画师串" title="放大编辑">
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 11.2V13h1.8l7.3-7.3-1.8-1.8L3 11.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M9.6 4.6l1.8 1.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              </button>
             </div>
             <textarea id="artist-prompt" rows="2" spellcheck="false" placeholder="例如：artist:wlop, artist:ask_(askzy)"></textarea>
           </div>
@@ -343,6 +354,9 @@
             <div class="label-row">
               <label for="negative-prompt">负面提示词</label>
               <span class="field-hint">Negative</span>
+              <button type="button" class="prompt-pencil" data-editor-target="negative-prompt" aria-label="放大编辑负面提示词" title="放大编辑">
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 11.2V13h1.8l7.3-7.3-1.8-1.8L3 11.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M9.6 4.6l1.8 1.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              </button>
             </div>
             <textarea id="negative-prompt" rows="4" spellcheck="false" placeholder="lowres, bad anatomy, bad hands…"></textarea>
             <p class="field-help">同时作为 <code>negative_prompt</code> 与 V4/V5 的 <code>v4_negative_prompt</code> 发送。</p>
@@ -395,11 +409,16 @@
           </div>
         </div>
         <div class="topbar-actions">
+          <button type="button" class="icon-btn" id="focus-toggle" aria-label="专注画廊" aria-pressed="false" title="专注画廊：隐藏侧栏与输入区（Esc 退出）">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M7 3.5H3.5V7M13 3.5h3.5V7M7 16.5H3.5V13M13 16.5h3.5V13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
           <div class="connection-badge">
             <span class="connection-dot" aria-hidden="true"></span>
             <span>LOCAL ONLY</span>
           </div>
-          <span class="version-badge">v1.7</span>
+          <span class="version-badge">v1.8</span>
         </div>
       </header>
 
@@ -409,6 +428,8 @@
             <div class="gallery-title-row">
               <h2 id="gallery-title">历史作品</h2>
               <span class="count-badge" id="gallery-count">0 张</span>
+              <button type="button" class="mini-btn gallery-view-toggle" id="gallery-view" aria-pressed="false" title="切换记录 / 图片视图">图片视图</button>
+              <button type="button" class="mini-btn gallery-density" id="gallery-density" aria-pressed="false" title="切换卡片密度">紧凑图墙</button>
             </div>
             <p>图片与最终 Tag 均保存在本机的 <code>outputs/</code> 目录。</p>
           </div>
@@ -479,14 +500,17 @@
         </div>
       </section>
 
-      <section class="composer glass-panel" aria-label="图片生成输入区">
+      <section class="composer glass-panel" id="composer" aria-label="图片生成输入区">
         <div class="composer-main">
           <div class="prompt-box">
             <div class="prompt-box-head">
               <label for="prompt-input">描绘你的画面</label>
-              <span>Natural language · 任意语言</span>
+              <div class="prompt-box-tools">
+                <span>Natural language · 任意语言</span>
+                <button type="button" class="text-btn composer-expand" id="composer-expand" aria-expanded="false" title="展开为更大的编辑区">展开编辑</button>
+              </div>
             </div>
-            <textarea id="prompt-input" rows="2" maxlength="4000" placeholder="例如：雨夜的电车月台，穿水手服的少女回头看向镜头，霓虹倒影，电影感构图……"></textarea>
+            <textarea id="prompt-input" rows="2" maxlength="4000" placeholder="例如：雨夜的电车月台，穿水手服的少女回头，霓虹倒影……"></textarea>
             <div class="prompt-box-foot">
               <span class="keyboard-hint"><kbd>Ctrl</kbd><kbd>↵</kbd> 快速生成</span>
               <span class="char-count" id="char-count">0 / 4000</span>
@@ -526,6 +550,7 @@
           <div class="queue-head">
             <span class="queue-title">生成队列 <span class="mini-badge" id="queue-count">0</span></span>
             <div class="queue-head-actions">
+              <button type="button" class="mini-btn" id="queue-toggle" aria-expanded="true">收起</button>
               <button type="button" class="mini-btn" id="queue-cancel-all">取消全部排队</button>
             </div>
           </div>
@@ -541,8 +566,8 @@
       <button type="button" class="lightbox-close icon-btn" id="lightbox-close" aria-label="关闭大图">
         <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
       </button>
-      <div class="lightbox-visual">
-        <img id="lightbox-image" alt="">
+      <div class="lightbox-visual" id="lightbox-visual">
+        <img id="lightbox-image" alt="" role="button" draggable="false" tabindex="0" title="点击全屏查看原图">
         <button type="button" class="lightbox-nav lightbox-nav--prev" id="lightbox-prev" aria-label="上一张作品" title="上一张（←）">
           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M12.5 4.5L7 10l5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -555,6 +580,13 @@
         <span class="eyebrow">GENERATION DETAIL</span>
         <h2 id="lightbox-title">作品详情</h2>
         <div class="lightbox-date" id="lightbox-date"></div>
+        <div class="lightbox-original" id="lightbox-original">
+          <div class="lightbox-original-head">
+            <span>原始输入</span>
+            <button type="button" class="text-btn" id="lightbox-reuse-text">填回输入框</button>
+          </div>
+          <p id="lightbox-original-text"></p>
+        </div>
         <div class="lightbox-chips" id="lightbox-chips"></div>
         <div class="lightbox-album-row">
           <label for="lightbox-album">所属画册</label>
@@ -567,7 +599,12 @@
         <div class="lightbox-prompt">
           <div class="lightbox-prompt-head">
             <span>FINAL PROMPT · 可编辑后重画</span>
-            <button type="button" class="text-btn" id="lightbox-prompt-reset">恢复原 Tag</button>
+            <div class="lightbox-prompt-tools">
+              <button type="button" class="prompt-pencil" data-editor-target="lightbox-prompt-edit" aria-label="放大编辑最终 Tag" title="放大编辑">
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 11.2V13h1.8l7.3-7.3-1.8-1.8L3 11.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M9.6 4.6l1.8 1.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              </button>
+              <button type="button" class="text-btn" id="lightbox-prompt-reset">恢复原 Tag</button>
+            </div>
           </div>
           <textarea id="lightbox-prompt-edit" rows="6" spellcheck="false" aria-label="可编辑的最终 Tag"></textarea>
           <details class="lightbox-negative">
@@ -720,8 +757,49 @@
     </div>
   </dialog>
 
+  <dialog class="panel-dialog record-dialog" id="record-dialog" aria-labelledby="record-dialog-title">
+    <div class="panel-dialog-head record-dialog-head">
+      <div class="record-dialog-heading">
+        <span class="eyebrow">CREATION RECORD</span>
+        <h2 id="record-dialog-title">记录</h2>
+        <p class="record-original-text" id="record-original-text"></p>
+      </div>
+      <div class="panel-dialog-actions">
+        <button type="button" class="mini-btn" id="record-reuse-text" title="把原始输入填回底部输入框">填回输入框</button>
+        <button type="button" class="mini-btn record-reroll" id="record-reroll" title="用同一段原始输入重新生成一个 Tag 版本（不自动生图）">重 roll Tags</button>
+        <button type="button" class="icon-btn" id="record-close" aria-label="关闭记录详情">
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
+    <p class="panel-dialog-help" id="record-help">同一条记录下的多个 Tag 版本并排对比；每个版本的标题 / Tags 都可编辑，保存后只影响之后生成的新图。点「重 roll Tags」只生成新版本，选中版本后再手动生图。</p>
+    <div class="record-variants" id="record-variants"></div>
+  </dialog>
+
+  <dialog class="panel-dialog text-editor-dialog" id="text-editor-dialog" aria-labelledby="text-editor-title">
+    <form method="dialog" id="text-editor-form">
+      <div class="panel-dialog-head">
+        <div>
+          <span class="eyebrow">EDIT PROMPT</span>
+          <h2 id="text-editor-title">编辑提示词</h2>
+        </div>
+        <button type="button" class="icon-btn" id="text-editor-close" aria-label="关闭编辑器">
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <p class="panel-dialog-help" id="text-editor-help"></p>
+      <div class="text-editor-body">
+        <textarea id="text-editor-input" rows="16" spellcheck="false"></textarea>
+      </div>
+      <div class="text-editor-actions">
+        <button type="button" class="btn btn-secondary" id="text-editor-cancel">取消</button>
+        <button type="submit" class="btn btn-primary" id="text-editor-save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="/app.js?v=1.7.0" defer></script>
+  <script src="/app.js?v=1.8.0" defer></script>
 </body>
 </html>

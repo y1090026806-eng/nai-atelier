@@ -4,13 +4,15 @@
 
 界面使用深色磨砂玻璃风格，布局与交互参考 SillyTavern：左侧配置栏，右侧画廊工作区，底部输入与 Generate 按钮。
 
-> 当前版本：**1.7.0**（2026-11-26）。本版新增 **PNG 元数据 + 配套 JSON 导出**：每次生成 / 重画保存图片时自动把 A1111 兼容的 `parameters` 与完整元数据 JSON 写入 PNG 文本块，并在图片同目录生成 `.json` sidecar；画廊头部「元数据」可一键补写全部作品并下载 ZIP，灯箱可单独下载作品 JSON。`npm run verify` 已扩到 **235 项全部通过**。
+> 当前版本：**1.8.0**（2026-11-26）。本版新增**创作记录**：以用户原始输入为一条记录，记录下保存多个可编辑的 LLM Tag 版本，每个版本可生成并叠放多张图片；支持 Tag 重 roll、同层并排对比、记录标题编辑、原始输入回填。另新增 NAI 预设 JSON 导入 / 导出、提示词铅笔大编辑器、历史原始输入展示。`npm run verify` 已扩到 **244 项全部通过**。
 
 ## 功能
 
 - **统一 OpenAI 兼容接口**：DeepSeek、Gemini（OpenAI 兼容端点）、OpenAI 以及各类中转站都用同一套 `/chat/completions` 协议，只需填 Base URL、API Key 与模型名。
 - **拉取模型**：在侧栏点「拉取模型」即可从当前 Base URL 读取模型列表（`GET /models`），结果会以可点击列表显示在模型输入框下方；列表随配置保存，刷新后仍保留。
-- **LLM / NovelAI 配置预设**：两套配置都能保存为**自定义命名**的预设，用下拉框一键切换；支持重命名覆盖与删除。LLM 预设含连接信息、参数、提示词结构与模型列表；NovelAI 预设含模型、采样、尺寸、Seed 与提示词。
+- **LLM / NovelAI 配置预设**：两套配置都能保存为**自定义命名**的预设，用下拉框一键切换；支持重命名覆盖与删除。LLM 预设含连接信息、参数、提示词结构与模型列表；NovelAI 预设含模型、采样、尺寸、Seed 与提示词；NovelAI 预设支持 JSON 导入 / 导出（不含 Key）。
+- **创作记录**：默认按原始输入分组。每条记录保存用户原始描述、多个可编辑的 LLM Tag 版本（含 LLM 标题）以及每个版本下的多张图片；支持 Tag 重 roll、同层并排对比、从任意版本继续生图、把原始输入一键填回输入框。旧作品会自动迁移为独立记录。
+- **提示词大编辑器**：基础正向 / 画师串 / 负面 / 提示词块 / 灯箱最终 Tag 都有铅笔按钮，可在独立大编辑器中修改并写回。
 - **可组合提示词结构**：可添加多段 System / Assistant / User 提示词，分别指定放在「用户输入之前」或「之后」，并调整顺序。
 - **可调生成参数**：温度、Top P、最大 Token、思考强度（`reasoning_effort`）与 LLM 请求超时（秒）。
 - **完整 NovelAI 参数**：模型版本、Sampler、Noise Schedule、Steps、Guidance、CFG Rescale、宽高、Seed、Quality Tags。
@@ -72,7 +74,7 @@ outputs/.trash/      # 回收站图片（隐藏目录，不对 /outputs 暴露�
 
 代码托管在**私有** GitHub 仓库：<https://github.com/y1090026806-eng/nai-atelier>（需登录且有权限才能访问）。
 
-- `main` 分支对应项目当前代码；标签 `v1.7.0` 对应本版本。
+- `main` 分支对应项目当前代码；标签 `v1.8.0` 对应本版本。
 - `.gitignore` 已忽略 `data/config.json`（含 API Key）、`data/*.json`、`outputs/`（作品与回收站）、`node_modules/`、`*.log`，这些内容不会进入仓库。
 - 本机已安装 GitHub CLI 并登录账号 `y1090026806-eng`；换机器后先 `gh auth login`，再用 `git push` 即可继续同步。
 
@@ -82,7 +84,7 @@ outputs/.trash/      # 回收站图片（隐藏目录，不对 /outputs 暴露�
 npm run verify
 ```
 
-会在临时目录里启动一份 `server.js`，配合本地假 LLM / 假 NovelAI 上游（含慢速模式，用于验证运行中取消），检查配置归一化、标签生成、提示词结构、模型拉取、LLM/NovelAI 预设、提示词拼接顺序与加权 Tag 去重、负面提示词、画册文件夹与归档、画册封面、作品排序、批量移动 / 删除、回收站恢复与清理、提示词收藏、单张删除、编辑提示词 / 模型重画、Tag 权重、生成队列（并发为 1、取消排队中与运行中任务、取消全部）、NovelAI 超时、错误处理以及重启恢复。1.7.0 在原有 183 项基础上新增元数据导出检查（PNG `tEXt` / `iTXt` 写入与替换、sidecar 内容、单张元数据接口、批量同步、ZIP / `manifest.json` / `X-Metadata-Count`、移动 / 删除 / 恢复时的 sidecar 生命周期），当前 **235/235 全部通过**。不会读取真实 `data/config.json`、不访问外网、不消耗任何额度，结束后自动清理临时文件。
+会在临时目录里启动一份 `server.js`，配合本地假 LLM / 假 NovelAI 上游（含慢速模式，用于验证运行中取消），检查配置归一化、标签生成、提示词结构、模型拉取、LLM/NovelAI 预设、提示词拼接顺序与加权 Tag 去重、负面提示词、画册文件夹与归档、画册封面、作品排序、批量移动 / 删除、回收站恢复与清理、提示词收藏、单张删除、编辑提示词 / 模型重画、Tag 权重、生成队列（并发为 1、取消排队中与运行中任务、取消全部）、NovelAI 超时、创作记录（Tag 重 roll / 记录生图 / 标题与 Tags 编辑 / 重复输入归组）、错误处理以及重启恢复。当前 **244/244 全部通过**。不会读取真实 `data/config.json`、不访问外网、不消耗任何额度，结束后自动清理临时文件。
 
 ## 配置说明
 
@@ -472,7 +474,7 @@ DELETE /api/history/<id>?permanent=1  # 彻底删除，无法恢复
   "metadata": {
     "schema": "nai-atelier.metadata/1",
     "app": "NAI Atelier",
-    "appVersion": "1.7.0",
+    "appVersion": "1.8.0",
     "exportedAt": "2026-11-26T08:00:00.000Z",
     "id": "uuid",
     "filename": "nai-20261126-010707-500cad.png",
@@ -598,7 +600,7 @@ DELETE /api/history/<id>?permanent=1  # 彻底删除，无法恢复
 
 ### `GET /api/health`
 
-返回运行状态，便于检查服务是否启动（1.7.0 的 `version` 为 `1.7.0`）。
+返回运行状态，便于检查服务是否启动（1.8.0 的 `version` 为 `1.8.0`）。
 
 ## 目录结构
 
@@ -615,6 +617,7 @@ D:\NAI-Atelier\
 ├─ data/                  # 运行时自动生成
 │  ├─ config.json
 │  ├─ history.json
+│  ├─ records.json         # 创作记录：原始输入、Tag 版本与标题
 │  ├─ albums.json         # 画册列表（含封面 coverId）
 │  ├─ trash.json          # 回收站索引
 │  └─ prompts.json        # 提示词收藏
@@ -657,7 +660,7 @@ $env:PORT=4000; npm start
 
 - 应用默认只监听 `127.0.0.1`，并仅对 localhost 来源开放 CORS。
 - API Keys 以明文形式保存在本地 `data/config.json`，该文件已被 `.gitignore` 忽略。请勿分享该文件。
-- `data/history.json`、`data/albums.json`、`data/trash.json`、`data/prompts.json` 与 `outputs/` 都只属于本机；不要手动删除 `outputs/`（包括 `outputs/.trash/` 里的回收站图片），否则作品与回收站会失去对应文件。
+- `data/history.json`、`data/records.json`、`data/albums.json`、`data/trash.json`、`data/prompts.json` 与 `outputs/` 都只属于本机；不要手动删除 `outputs/`（包括 `outputs/.trash/` 里的回收站图片），否则作品与回收站会失去对应文件。
 - **元数据隐私**：每次生成 / 重画都会把 prompt、seed、参数等写进 PNG 文本块，并在 `outputs/` 中生成 sidecar `.json`。分享 PNG 或整个 `outputs/` 目录等于分享这些生成参数；API Key 等凭据不在元数据字段内。`outputs/` 已被 `.gitignore` 忽略。
 - `/outputs` 禁止访问点开头的文件/目录，回收站图片只通过 `/trash-files/<file>` 挂载访问，不会出现在普通画廊里。
 - 不要在没有额外认证的情况下把本服务暴露到局域网或公网。
@@ -668,6 +671,7 @@ $env:PORT=4000; npm start
 
 | 版本 | 主要变化 |
 | --- | --- |
+| 1.8.0 | 创作记录（原始输入 → 多个可编辑 Tag 版本 → 多张图片）、Tag 重 roll 与同层对比、记录标题编辑、原始输入回填；NAI 预设 JSON 导入 / 导出；提示词铅笔大编辑器；历史原始输入展示；自检扩到 244 项 |
 | 1.7.0 | PNG 元数据（A1111 `parameters` + `NAI-Atelier` JSON 文本块）与配套 `.json` sidecar；画廊「元数据」一键补写并下载 ZIP、灯箱下载单张 JSON；新增元数据 API；自检扩到 235 项 |
 | 1.6.0 | 画册封面、拖拽排序、批量操作 / 清空画廊 / 回收站、提示词收藏库、Tag 权重编辑、生成队列与取消、可配置 NovelAI 超时；自检扩到 183 项 |
 | 1.5.0 | 画册（真实文件夹 + 归档 / 筛选 / 重命名 / 删除）、单张删除、灯箱编辑提示词 / 模型后重画与翻页对比、静态资源缓存修复 |

@@ -65,6 +65,10 @@
   const WEIGHT_STEP = 0.05;
   const JOB_POLL_MS = 800;
   const MAX_QUEUE_ROWS = 10;
+  const MAX_NAI_PRESETS = 30;
+  const GALLERY_DENSITY_KEY = 'nai-atelier.gallery-density';
+  const GALLERY_VIEW_KEY = 'nai-atelier.gallery-view';
+  const SIDEBAR_COLLAPSED_KEY = 'nai-atelier.sidebar-collapsed';
 
   const RESOLUTION_PRESETS = {
     portrait: { width: 832, height: 1216 },
@@ -116,15 +120,43 @@
     elapsedJobId: '',
     progressHideTimer: null,
     toastTimers: new Set(),
+    galleryDensity: 'detailed',
+    galleryDensityManual: false,
+    viewMode: 'records',
+    records: [],
+    activeRecordId: '',
+    textEditorSave: null,
+    sidebarCollapsed: false,
+    focusMode: false,
+    composerExpanded: false,
+    queueCollapsed: false,
   };
 
   const ui = {};
 
+  function readPreference(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function writePreference(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      // Preferences are best-effort; the UI still works without storage.
+    }
+  }
+
   function cacheElements() {
     const ids = [
+      'app-shell',
       'sidebar',
       'sidebar-close',
       'sidebar-toggle',
+      'focus-toggle',
       'sidebar-backdrop',
       'llm-preset',
       'llm-preset-save',
@@ -149,6 +181,9 @@
       'nai-preset',
       'nai-preset-save',
       'nai-preset-delete',
+      'nai-preset-export',
+      'nai-preset-import',
+      'nai-preset-file',
       'nai-model',
       'nai-sampler',
       'noise-schedule',
@@ -175,9 +210,12 @@
       'save-state-text',
       'refresh-history',
       'gallery-count',
+      'gallery-title',
       'gallery-grid',
       'gallery-empty',
       'gallery-scroll',
+      'gallery-density',
+      'gallery-view',
       'gallery-clear',
       'export-metadata',
       'album-chips',
@@ -199,6 +237,8 @@
       'empty-copy',
       'prompt-input',
       'char-count',
+      'composer',
+      'composer-expand',
       'generate-btn',
       'generate-label',
       'generate-sub',
@@ -209,14 +249,19 @@
       'queue-panel',
       'queue-count',
       'queue-list',
+      'queue-toggle',
       'queue-cancel-all',
       'progress-track',
       'progress-fill',
       'lightbox',
       'lightbox-image',
+      'lightbox-visual',
       'lightbox-close',
       'lightbox-date',
       'lightbox-chips',
+      'lightbox-original',
+      'lightbox-original-text',
+      'lightbox-reuse-text',
       'lightbox-prev',
       'lightbox-next',
       'lightbox-counter',
@@ -238,6 +283,21 @@
       'tag-weight-count',
       'tag-weight-list',
       'tag-weight-reset',
+      'record-dialog',
+      'record-dialog-title',
+      'record-original-text',
+      'record-reuse-text',
+      'record-reroll',
+      'record-close',
+      'record-variants',
+      'text-editor-dialog',
+      'text-editor-form',
+      'text-editor-title',
+      'text-editor-help',
+      'text-editor-input',
+      'text-editor-close',
+      'text-editor-cancel',
+      'text-editor-save',
       'trash-dialog',
       'trash-close',
       'trash-empty',
@@ -278,6 +338,149 @@
       const key = id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
       ui[key] = document.getElementById(id);
     }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Layout preferences                                                     */
+  /* ---------------------------------------------------------------------- */
+
+  function defaultGalleryDensity() {
+    return window.innerWidth <= 680 || window.innerHeight < 780
+      ? 'compact'
+      : 'detailed';
+  }
+
+  function applyGalleryDensity(mode, { persist = false } = {}) {
+    const compact = mode === 'compact';
+    state.galleryDensity = compact ? 'compact' : 'detailed';
+    ui.galleryGrid.classList.toggle('is-compact', compact);
+    ui.galleryDensity.setAttribute('aria-pressed', String(compact));
+    ui.galleryDensity.setAttribute(
+      'aria-label',
+      compact ? '当前紧凑图墙，切换到详细卡片' : '当前详细卡片，切换到紧凑图墙',
+    );
+    ui.galleryDensity.textContent = compact ? '详细卡片' : '紧凑图墙';
+    ui.galleryDensity.title = compact
+      ? '当前：紧凑图墙（点击切换详细卡片）'
+      : '当前：详细卡片（点击切换紧凑图墙）';
+    if (persist) writePreference(GALLERY_DENSITY_KEY, state.galleryDensity);
+  }
+
+  function initGalleryDensity() {
+    const stored = readPreference(GALLERY_DENSITY_KEY);
+    if (stored === 'compact' || stored === 'detailed') {
+      state.galleryDensityManual = true;
+      applyGalleryDensity(stored);
+      return;
+    }
+    applyGalleryDensity(defaultGalleryDensity());
+  }
+
+  function toggleGalleryDensity() {
+    state.galleryDensityManual = true;
+    applyGalleryDensity(
+      state.galleryDensity === 'compact' ? 'detailed' : 'compact',
+      { persist: true },
+    );
+  }
+
+  function applyGalleryView(mode, { persist = false, render = true } = {}) {
+    state.viewMode = mode === 'images' ? 'images' : 'records';
+    const records = state.viewMode === 'records';
+    ui.galleryGrid.classList.toggle('is-record-view', records);
+    ui.galleryView.setAttribute('aria-pressed', String(records));
+    ui.galleryView.textContent = records ? '图片视图' : '记录视图';
+    ui.galleryView.title = records
+      ? '当前：记录视图（点击切换全部图片）'
+      : '当前：图片视图（点击切换记录分组）';
+    ui.galleryView.setAttribute(
+      'aria-label',
+      records ? '当前记录视图，切换到图片视图' : '当前图片视图，切换到记录视图',
+    );
+    ui.galleryTitle.textContent = records ? '创作记录' : '历史作品';
+    if (persist) writePreference(GALLERY_VIEW_KEY, state.viewMode);
+    if (records) {
+      state.selected.clear();
+      ui.selectionBar.hidden = true;
+    }
+    if (render) renderGallery();
+  }
+
+  function initGalleryView() {
+    const stored = readPreference(GALLERY_VIEW_KEY);
+    applyGalleryView(stored === 'images' ? 'images' : 'records', { render: false });
+  }
+
+  function toggleGalleryView() {
+    applyGalleryView(state.viewMode === 'records' ? 'images' : 'records', {
+      persist: true,
+    });
+  }
+
+  function updateSidebarToggleLabel() {
+    const desktop = window.innerWidth > 900;
+    if (desktop) {
+      const label = state.sidebarCollapsed ? '展开配置面板' : '收起配置面板';
+      ui.sidebarToggle.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
+      ui.sidebarToggle.setAttribute('aria-label', label);
+      ui.sidebarToggle.title = label;
+      return;
+    }
+    const open = ui.sidebar.classList.contains('is-open');
+    const label = open ? '关闭配置面板' : '打开配置面板';
+    ui.sidebarToggle.setAttribute('aria-expanded', String(open));
+    ui.sidebarToggle.setAttribute('aria-label', label);
+    ui.sidebarToggle.title = label;
+  }
+
+  function applySidebarCollapsed(collapsed, { persist = false } = {}) {
+    state.sidebarCollapsed = Boolean(collapsed);
+    ui.appShell.classList.toggle('is-sidebar-collapsed', state.sidebarCollapsed);
+    updateSidebarToggleLabel();
+    updateComposerMetrics();
+    if (persist) {
+      writePreference(SIDEBAR_COLLAPSED_KEY, String(state.sidebarCollapsed));
+    }
+  }
+
+  function initLayoutPreferences() {
+    initGalleryDensity();
+    initGalleryView();
+    applySidebarCollapsed(readPreference(SIDEBAR_COLLAPSED_KEY) === 'true');
+  }
+
+  function setFocusMode(active) {
+    state.focusMode = Boolean(active);
+    ui.appShell.classList.toggle('focus-mode', state.focusMode);
+    ui.focusToggle.setAttribute('aria-pressed', String(state.focusMode));
+    ui.focusToggle.setAttribute(
+      'aria-label',
+      state.focusMode ? '退出专注画廊' : '专注画廊',
+    );
+    ui.focusToggle.title = state.focusMode
+      ? '退出专注画廊（Esc）'
+      : '专注画廊：隐藏侧栏与输入区（Esc 退出）';
+    if (state.focusMode && ui.sidebar.classList.contains('is-open')) {
+      setSidebar(false);
+    }
+    updateComposerMetrics();
+  }
+
+  function setComposerExpanded(expanded) {
+    state.composerExpanded = Boolean(expanded);
+    ui.composer.classList.toggle('is-expanded', state.composerExpanded);
+    ui.composerExpand.textContent = state.composerExpanded ? '收起编辑' : '展开编辑';
+    ui.composerExpand.setAttribute('aria-expanded', String(state.composerExpanded));
+    ui.composerExpand.title = state.composerExpanded ? '收起编辑区' : '展开为更大的编辑区';
+    updateComposerMetrics();
+    if (state.composerExpanded) ui.promptInput.focus({ preventScroll: true });
+  }
+
+  function setQueueCollapsed(collapsed) {
+    state.queueCollapsed = Boolean(collapsed);
+    ui.queuePanel.classList.toggle('is-collapsed', state.queueCollapsed);
+    ui.queueToggle.textContent = state.queueCollapsed ? '展开' : '收起';
+    ui.queueToggle.setAttribute('aria-expanded', String(!state.queueCollapsed));
   }
 
   /* ---------------------------------------------------------------------- */
@@ -420,6 +623,53 @@
     } catch {
       showToast('复制失败，请在详情面板中手动选择文本。', 'error');
     }
+  }
+
+  function downloadBlob(filename, content, type = 'application/json') {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.style.display = 'none';
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function openTextEditor({ title, help, value, maxLength = 0, onSave }) {
+    state.textEditorSave = typeof onSave === 'function' ? onSave : null;
+    ui.textEditorTitle.textContent = title || '编辑提示词';
+    ui.textEditorHelp.textContent = help || '在大编辑器中修改，保存后写回原字段。';
+    ui.textEditorInput.value = asText(value);
+    if (maxLength > 0) ui.textEditorInput.setAttribute('maxlength', String(maxLength));
+    else ui.textEditorInput.removeAttribute('maxlength');
+    if (!ui.textEditorDialog.open) {
+      try {
+        ui.textEditorDialog.showModal();
+      } catch {
+        showToast('当前浏览器不支持大编辑器。', 'error');
+        return;
+      }
+    }
+    window.setTimeout(() => {
+      ui.textEditorInput.focus();
+      const end = ui.textEditorInput.value.length;
+      ui.textEditorInput.setSelectionRange(end, end);
+    }, 30);
+  }
+
+  function closeTextEditor() {
+    state.textEditorSave = null;
+    if (ui.textEditorDialog.open) ui.textEditorDialog.close();
+  }
+
+  function submitTextEditor() {
+    const callback = state.textEditorSave;
+    const value = ui.textEditorInput.value;
+    closeTextEditor();
+    if (callback) callback(value);
   }
 
   /* ---------------------------------------------------------------------- */
@@ -793,6 +1043,21 @@
       const actions = document.createElement('div');
       actions.className = 'prompt-block-actions';
 
+      const expand = createTinyButton('✎', '放大编辑这段提示词');
+      expand.addEventListener('click', () => {
+        openTextEditor({
+          title: '编辑提示词块',
+          help: '这段内容会按角色与插入位置发送给 LLM；保存后写回提示词结构。',
+          value: block.content,
+          maxLength: 8000,
+          onSave: (value) => {
+            block.content = value;
+            markDirty();
+            renderPromptBlocks();
+          },
+        });
+      });
+
       const up = createTinyButton('↑', '上移');
       up.disabled = index === 0;
       up.addEventListener('click', () => movePromptBlock(block.id, -1));
@@ -804,7 +1069,7 @@
       const remove = createTinyButton('×', '删除这段提示词');
       remove.addEventListener('click', () => removePromptBlock(block.id));
 
-      actions.append(up, down, remove);
+      actions.append(expand, up, down, remove);
       head.append(role, position, actions);
 
       const area = document.createElement('textarea');
@@ -1295,6 +1560,109 @@
     }
   }
 
+  function handleNaiPresetExport() {
+    if (state.naiPresets.length === 0) {
+      showToast('还没有 NovelAI 预设可以导出。', 'warning');
+      return;
+    }
+    const presets = state.naiPresets.map((preset) => {
+      const normalized = normalizeNaiPreset(preset);
+      const { id, ...rest } = normalized;
+      return rest;
+    });
+    const payload = {
+      schema: 'nai-atelier.nai-presets/1',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      presets,
+    };
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    downloadBlob(
+      `nai-atelier-nai-presets-${stamp}.json`,
+      `${JSON.stringify(payload, null, 2)}\n`,
+    );
+    showToast(`已导出 ${presets.length} 个 NovelAI 预设（不含 API Key）。`, 'success', 3600);
+  }
+
+  function nextImportedPresetName(base, usedNames) {
+    const root = asText(base).trim().slice(0, 60) || '导入预设';
+    let candidate = root;
+    let counter = 2;
+    while (usedNames.has(candidate.toLowerCase())) {
+      const suffix = ` (${counter})`;
+      candidate = `${root.slice(0, 60 - suffix.length).trim()}${suffix}`;
+      counter += 1;
+    }
+    usedNames.add(candidate.toLowerCase());
+    return candidate;
+  }
+
+  async function handleNaiPresetImportFile(event) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new Error('文件不是有效的 JSON。');
+      }
+      const rows = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.presets)
+          ? parsed.presets
+          : Array.isArray(parsed?.novelai?.presets)
+            ? parsed.novelai.presets
+            : null;
+      if (!rows) {
+        throw new Error('JSON 里没有找到 presets 数组。');
+      }
+
+      const previousPresets = JSON.parse(JSON.stringify(state.naiPresets));
+      const previousActive = state.activeNaiPresetId;
+      const usedNames = new Set(state.naiPresets.map((preset) => preset.name.toLowerCase()));
+      const imported = [];
+      for (const row of rows) {
+        if (state.naiPresets.length + imported.length >= MAX_NAI_PRESETS) break;
+        if (!row || typeof row !== 'object' || typeof row.name !== 'string' || !row.name.trim()) {
+          continue;
+        }
+        const preset = normalizeNaiPreset(row);
+        preset.id = uid();
+        preset.name = nextImportedPresetName(preset.name, usedNames);
+        imported.push(preset);
+      }
+
+      if (imported.length === 0) {
+        showToast('没有可导入的有效预设。', 'warning');
+        return;
+      }
+
+      state.naiPresets.push(...imported);
+      renderNaiPresetSelect();
+      try {
+        await persistConfig();
+        showToast(
+          `已导入 ${imported.length} 个 NovelAI 预设${rows.length > imported.length ? `（其余 ${rows.length - imported.length} 个已跳过）` : ''}。`,
+          'success',
+          4400,
+        );
+      } catch (error) {
+        state.naiPresets = previousPresets;
+        state.activeNaiPresetId = previousActive;
+        renderNaiPresetSelect();
+        showToast(error.message, 'error');
+      }
+    } catch (error) {
+      showToast(error.message || '导入预设失败。', 'error');
+    } finally {
+      input.value = '';
+    }
+  }
+
   function handleNaiPresetChange() {
     const selectedId = ui.naiPreset.value;
     state.activeNaiPresetId = selectedId;
@@ -1420,6 +1788,9 @@
       url: item.url,
       albumId: asText(item.albumId) || null,
       parentId: asText(item.parentId),
+      recordId: asText(item.recordId),
+      variantId: asText(item.variantId),
+      userText: asText(item.userText),
       prompt: asText(item.prompt),
       llmTags: asText(item.llmTags),
       negativePrompt: asText(item.negativePrompt),
@@ -1438,6 +1809,85 @@
       createdAt: asText(item.createdAt),
       elapsedMs: Number(item.elapsedMs) || 0,
     };
+  }
+
+  function normalizeRecordRow(raw) {
+    if (!raw || typeof raw.id !== 'string' || !raw.id) return null;
+    const variants = (Array.isArray(raw.variants) ? raw.variants : [])
+      .filter((variant) => variant && typeof variant.id === 'string' && variant.id)
+      .map((variant) => ({
+        id: variant.id,
+        title: asText(variant.title),
+        llmTags: asText(variant.llmTags),
+        source: ['llm', 'manual', 'legacy'].includes(variant.source)
+          ? variant.source
+          : 'llm',
+        llmModel: asText(variant.llmModel),
+        createdAt: asText(variant.createdAt),
+        updatedAt: asText(variant.updatedAt),
+        imageCount: Number(variant.imageCount) || 0,
+      }));
+    if (variants.length === 0) return null;
+    return {
+      id: raw.id,
+      userText: asText(raw.userText),
+      title: asText(raw.title),
+      createdAt: asText(raw.createdAt),
+      updatedAt: asText(raw.updatedAt),
+      variants,
+      variantCount: Number(raw.variantCount) || variants.length,
+      imageCount: Number(raw.imageCount) || 0,
+      coverId: asText(raw.coverId),
+      coverUrl: asText(raw.coverUrl),
+      latestImageAt: asText(raw.latestImageAt),
+    };
+  }
+
+  function normalizeRecordRows(rows) {
+    return (Array.isArray(rows) ? rows : [])
+      .map(normalizeRecordRow)
+      .filter(Boolean);
+  }
+
+  async function loadRecords() {
+    const payload = await requestJson('/api/records');
+    state.records = normalizeRecordRows(payload.records);
+    if (state.activeRecordId && !state.records.some((record) => record.id === state.activeRecordId)) {
+      closeRecordDialog();
+    }
+    if (state.viewMode === 'records') renderGallery();
+    if (ui.recordDialog.open && state.activeRecordId) {
+      renderRecordDialog(state.activeRecordId);
+    }
+    return state.records.length;
+  }
+
+  function recordImages(recordId) {
+    return state.history.filter((item) => item.recordId === recordId);
+  }
+
+  function recordAlbumIds(recordId) {
+    return [...new Set(recordImages(recordId).map((item) => item.albumId).filter(Boolean))];
+  }
+
+  function recordTitle(record) {
+    return (
+      asText(record?.variants?.[0]?.title) ||
+      asText(record?.title) ||
+      asText(record?.userText).slice(0, 40) ||
+      '旧作品'
+    );
+  }
+
+  function visibleRecords() {
+    return state.records.filter((record) => {
+      const images = recordImages(record.id);
+      if (state.activeAlbumId === 'all') return true;
+      if (state.activeAlbumId === 'uncategorized') {
+        return images.length === 0 || images.some((item) => !item.albumId);
+      }
+      return images.some((item) => item.albumId === state.activeAlbumId);
+    });
   }
 
   function albumName(albumId) {
@@ -1588,6 +2038,12 @@
 
   function updateEmptyCopy() {
     const album = activeAlbum();
+    if (state.viewMode === 'records') {
+      ui.emptyTitle.textContent = '还没有创作记录。';
+      ui.emptyCopy.textContent =
+        '在下方输入一句画面描述；同一条记录的多次生图和多个 Tag 版本会收纳在一起。';
+      return;
+    }
     if (state.activeAlbumId === 'uncategorized') {
       ui.emptyTitle.textContent = '未分类还是空的。';
       ui.emptyCopy.textContent =
@@ -1606,6 +2062,11 @@
   }
 
   function renderGallery() {
+    if (state.viewMode === 'records') {
+      renderRecordGallery();
+      return;
+    }
+
     ui.galleryGrid.replaceChildren();
     updateEmptyCopy();
 
@@ -1622,12 +2083,116 @@
     ui.galleryGrid.hidden = false;
 
     const fragment = document.createDocumentFragment();
+    let index = 0;
     for (const item of items) {
-      fragment.append(createArtCard(item, false));
+      fragment.append(createArtCard(item, false, index < 12));
+      index += 1;
     }
     ui.galleryGrid.append(fragment);
     updateGalleryCount();
     refreshSelectionUI();
+  }
+
+  function renderRecordGallery() {
+    ui.galleryGrid.replaceChildren();
+    updateEmptyCopy();
+
+    const rows = visibleRecords();
+    if (rows.length === 0) {
+      ui.galleryEmpty.hidden = false;
+      ui.galleryGrid.hidden = true;
+      updateGalleryCount();
+      refreshSelectionUI();
+      return;
+    }
+
+    ui.galleryEmpty.hidden = true;
+    ui.galleryGrid.hidden = false;
+    const fragment = document.createDocumentFragment();
+    let index = 0;
+    for (const record of rows) {
+      fragment.append(createRecordCard(record, index < 12));
+      index += 1;
+    }
+    ui.galleryGrid.append(fragment);
+    updateGalleryCount();
+    refreshSelectionUI();
+  }
+
+  function createRecordCard(record, eager = false) {
+    const images = recordImages(record.id)
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const cover = images[0] || null;
+    const card = document.createElement('article');
+    card.className = 'record-card';
+    card.dataset.id = record.id;
+    card.title = record.userText || recordTitle(record);
+    card.classList.toggle('record-card--stacked', images.length > 1);
+
+    const stack = document.createElement('div');
+    stack.className = 'record-stack';
+
+    const coverButton = document.createElement('button');
+    coverButton.type = 'button';
+    coverButton.className = 'record-cover';
+    coverButton.setAttribute('aria-label', `打开记录：${recordTitle(record)}`);
+    if (cover) {
+      const image = document.createElement('img');
+      image.src = cover.url;
+      image.alt = `记录封面：${recordTitle(record)}`;
+      image.loading = eager ? 'eager' : 'lazy';
+      image.decoding = 'async';
+      image.draggable = false;
+      coverButton.append(image);
+    } else {
+      const empty = document.createElement('span');
+      empty.className = 'record-cover-empty';
+      empty.textContent = '尚未生图';
+      coverButton.append(empty);
+    }
+    coverButton.addEventListener('click', () => openRecordDialog(record.id));
+
+    const badges = document.createElement('div');
+    badges.className = 'record-badges';
+    const imageBadge = document.createElement('span');
+    imageBadge.className = 'record-badge';
+    imageBadge.textContent = `${images.length} 张`;
+    const variantBadge = document.createElement('span');
+    variantBadge.className = 'record-badge record-badge--accent';
+    variantBadge.textContent = `${record.variants.length} 版 Tags`;
+    badges.append(imageBadge, variantBadge);
+
+    stack.append(coverButton, badges);
+
+    const body = document.createElement('div');
+    body.className = 'record-body';
+
+    const title = document.createElement('h3');
+    title.className = 'record-title';
+    title.textContent = recordTitle(record);
+
+    const userText = document.createElement('p');
+    userText.className = 'record-usertext';
+    userText.textContent = record.userText || '旧作品 · 无原始输入';
+
+    const meta = document.createElement('div');
+    meta.className = 'record-meta';
+    const date = document.createElement('span');
+    date.textContent = formatCardDate(record.updatedAt || record.createdAt);
+    const tagCount = document.createElement('span');
+    tagCount.textContent = `${record.variants.length} 个 Tag 版本`;
+    const imageCount = document.createElement('span');
+    imageCount.textContent = `${images.length} 张图`;
+    meta.append(date, tagCount, imageCount);
+
+    body.append(title, userText, meta);
+    card.append(stack, body);
+    card.addEventListener('click', (event) => {
+      if (event.target.closest('button')) return;
+      openRecordDialog(record.id);
+    });
+    return card;
   }
 
   function appendGeneratedCard(item) {
@@ -1639,6 +2204,9 @@
     state.lastCreatedId = normalized.id;
     state.history = state.history.filter((entry) => entry.id !== normalized.id);
     state.history.unshift(normalized);
+
+    renderAlbums();
+    if (state.viewMode === 'records') return;
 
     ui.galleryEmpty.hidden = true;
     ui.galleryGrid.hidden = false;
@@ -1652,10 +2220,19 @@
     } else {
       renderGallery();
     }
-    renderAlbums();
   }
 
   function updateGalleryCount() {
+    if (state.viewMode === 'records') {
+      const visible = visibleRecords();
+      const imageTotal = visible.reduce((sum, record) => sum + recordImages(record.id).length, 0);
+      ui.galleryCount.textContent =
+        state.activeAlbumId === 'all'
+          ? `${visible.length} 条记录 · ${imageTotal} 张图`
+          : `${visible.length} / ${state.records.length} 条记录`;
+      ui.galleryCount.title = '当前视图按原始输入分组';
+      return;
+    }
     const visible = visibleHistory().length;
     ui.galleryCount.textContent =
       state.activeAlbumId === 'all'
@@ -1668,7 +2245,250 @@
         : '全部作品';
   }
 
-  function createArtCard(item, fresh) {
+  function activeJobFor(kind, recordId, variantId = '') {
+    return state.jobs.find(
+      (job) =>
+        job.kind === kind &&
+        job.recordId === recordId &&
+        (!variantId || job.variantId === variantId) &&
+        isActiveJob(job),
+    );
+  }
+
+  function targetAlbumId() {
+    return state.activeAlbumId !== 'all' && state.activeAlbumId !== 'uncategorized'
+      ? state.activeAlbumId
+      : null;
+  }
+
+  function recordVariantSourceLabel(source) {
+    if (source === 'manual') return '手动';
+    if (source === 'legacy') return '旧作品';
+    return 'LLM';
+  }
+
+  function openRecordDialog(recordId) {
+    const record = state.records.find((entry) => entry.id === recordId);
+    if (!record) {
+      showToast('没有找到这条记录，请刷新后再试。', 'error');
+      return;
+    }
+    state.activeRecordId = recordId;
+    renderRecordDialog(recordId);
+    if (!ui.recordDialog.open) {
+      try {
+        ui.recordDialog.showModal();
+      } catch {
+        showToast('当前浏览器不支持记录详情。', 'error');
+      }
+    }
+  }
+
+  function closeRecordDialog() {
+    if (ui.recordDialog.open) ui.recordDialog.close();
+    state.activeRecordId = '';
+  }
+
+  function refreshActiveRecordDialog() {
+    if (ui.recordDialog.open && state.activeRecordId) {
+      renderRecordDialog(state.activeRecordId);
+    }
+  }
+
+  function renderRecordDialog(recordId) {
+    const record = state.records.find((entry) => entry.id === recordId);
+    if (!record) {
+      closeRecordDialog();
+      return;
+    }
+    ui.recordDialogTitle.textContent = recordTitle(record);
+    ui.recordDialog.style.setProperty('--variant-count', String(record.variants.length));
+    ui.recordOriginalText.textContent = record.userText
+      ? `原始输入：${record.userText}`
+      : '旧作品 · 没有保存原始输入';
+    ui.recordReuseText.disabled = !record.userText;
+    const rerollJob = activeJobFor('reroll', record.id);
+    ui.recordReroll.disabled =
+      !record.userText || record.variants.length >= 30 || Boolean(rerollJob);
+    ui.recordReroll.textContent = rerollJob ? '重 roll 中…' : '重 roll Tags';
+    ui.recordReroll.title = !record.userText
+      ? '旧记录没有原始输入，无法重 roll'
+      : record.variants.length >= 30
+        ? 'Tag 版本已达上限'
+        : '用同一段原始输入重新生成一个 Tag 版本（不自动生图）';
+
+    const fragment = document.createDocumentFragment();
+    for (const variant of record.variants) {
+      fragment.append(createVariantCard(record, variant));
+    }
+    ui.recordVariants.replaceChildren(fragment);
+  }
+
+  function createVariantCard(record, variant) {
+    const card = document.createElement('section');
+    card.className = 'variant-card';
+    card.dataset.variantId = variant.id;
+
+    const head = document.createElement('div');
+    head.className = 'variant-card-head';
+    const titleInput = document.createElement('input');
+    titleInput.className = 'variant-title-input';
+    titleInput.type = 'text';
+    titleInput.maxLength = 80;
+    titleInput.value = variant.title || recordTitle(record);
+    titleInput.setAttribute('aria-label', 'Tag 版本标题');
+    const source = document.createElement('span');
+    source.className = 'variant-source';
+    source.textContent = recordVariantSourceLabel(variant.source);
+    head.append(titleInput, source);
+
+    const body = document.createElement('div');
+    body.className = 'variant-body';
+    const tags = document.createElement('textarea');
+    tags.className = 'variant-tags';
+    tags.spellcheck = false;
+    tags.value = variant.llmTags;
+    tags.setAttribute('aria-label', 'Tag 版本提示词');
+    tags.maxLength = 8000;
+
+    const actions = document.createElement('div');
+    actions.className = 'variant-actions';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'mini-btn variant-save';
+    save.textContent = '保存修改';
+    const render = document.createElement('button');
+    render.type = 'button';
+    render.className = 'mini-btn';
+    render.textContent = '用此版本生图';
+    const renderJob = activeJobFor('render', record.id, variant.id);
+    if (renderJob) {
+      render.disabled = true;
+      render.textContent = '已加入队列';
+    }
+    const count = document.createElement('span');
+    count.className = 'variant-count';
+    const variantImages = state.history.filter(
+      (item) => item.recordId === record.id && item.variantId === variant.id,
+    );
+    count.textContent = `${variantImages.length} 张图`;
+    actions.append(save, render, count);
+    body.append(tags, actions);
+
+    save.addEventListener('click', () => {
+      saveVariantChanges(record.id, variant.id, titleInput, tags, save);
+    });
+    render.addEventListener('click', () => {
+      enqueueVariantRender(record, variant, render);
+    });
+
+    const images = document.createElement('div');
+    images.className = 'variant-images';
+    if (variantImages.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'variant-empty';
+      empty.textContent = '这个 Tag 版本还没有生图。';
+      images.append(empty);
+    } else {
+      for (const item of variantImages) {
+        const imageButton = document.createElement('button');
+        imageButton.type = 'button';
+        imageButton.className = 'variant-image';
+        imageButton.setAttribute('aria-label', '查看这张图片');
+        const image = document.createElement('img');
+        image.src = item.url;
+        image.alt = item.prompt ? item.prompt.slice(0, 80) : '生成图片';
+        image.loading = 'lazy';
+        image.decoding = 'async';
+        imageButton.append(image);
+        imageButton.addEventListener('click', () => openLightbox(item));
+        images.append(imageButton);
+      }
+    }
+
+    card.append(head, body, images);
+    return card;
+  }
+
+  async function saveVariantChanges(recordId, variantId, titleInput, tagsArea, button) {
+    const title = titleInput.value.trim();
+    const llmTags = tagsArea.value.trim();
+    if (!llmTags) {
+      showToast('Tag 提示词不能为空。', 'warning');
+      tagsArea.focus();
+      return;
+    }
+    button.disabled = true;
+    try {
+      const payload = await requestJson(
+        `/api/records/${encodeURIComponent(recordId)}/variants/${encodeURIComponent(variantId)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ title, llmTags }),
+        },
+      );
+      const updated = normalizeRecordRow(payload.record);
+      if (updated) {
+        const index = state.records.findIndex((entry) => entry.id === updated.id);
+        if (index >= 0) state.records[index] = updated;
+      }
+      if (state.viewMode === 'records') renderGallery();
+      renderRecordDialog(recordId);
+      showToast('Tag 版本已保存；只影响之后用该版本生成的新图。', 'success', 3200);
+    } catch (error) {
+      showToast(error.message || '保存 Tag 版本失败。', 'error');
+      button.disabled = false;
+    }
+  }
+
+  async function enqueueVariantRender(record, variant, button) {
+    if (activeJobFor('render', record.id, variant.id)) return;
+    button.disabled = true;
+    button.textContent = '已加入队列';
+    try {
+      const job = await enqueueGenerationJob({
+        kind: 'render',
+        recordId: record.id,
+        variantId: variant.id,
+        albumId: targetAlbumId(),
+      });
+      if (job) {
+        showToast('已加入生图队列；完成后会出现在这个 Tag 版本下。', 'success', 3200);
+      }
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = '用此版本生图';
+      showToast(error.message || '加入生图队列失败。', 'error');
+    }
+  }
+
+  async function handleRecordReroll() {
+    const record = state.records.find((entry) => entry.id === state.activeRecordId);
+    if (!record || !record.userText) return;
+    if (activeJobFor('reroll', record.id)) return;
+    ui.recordReroll.disabled = true;
+    ui.recordReroll.textContent = '重 roll 中…';
+    try {
+      const job = await enqueueGenerationJob({ kind: 'reroll', recordId: record.id });
+      if (job) showToast('已加入 Tag 重 roll 队列；只生成新版本，不自动生图。', 'info', 3400);
+    } catch (error) {
+      showToast(error.message || '重 roll Tags 失败。', 'error');
+      renderRecordDialog(record.id);
+    }
+  }
+
+  function reuseUserText(text) {
+    const value = asText(text).trim();
+    if (!value) return;
+    if (ui.lightbox.open) closeLightbox();
+    if (ui.recordDialog.open) closeRecordDialog();
+    ui.promptInput.value = value;
+    updateComposerMetrics();
+    ui.promptInput.focus();
+    showToast('原始输入已填回底部输入框，可继续修改。', 'success', 2800);
+  }
+
+  function createArtCard(item, fresh, eager = false) {
     const card = document.createElement('article');
     card.className = fresh ? 'art-card art-card--new' : 'art-card';
     card.dataset.id = item.id;
@@ -1699,7 +2519,7 @@
     const image = document.createElement('img');
     image.src = item.url;
     image.alt = item.prompt ? `NovelAI 作品：${item.prompt.slice(0, 80)}` : 'NovelAI 生成图片';
-    image.loading = fresh ? 'eager' : 'lazy';
+    image.loading = fresh || eager ? 'eager' : 'lazy';
     image.decoding = 'async';
     image.draggable = false;
 
@@ -1751,6 +2571,11 @@
     actions.append(copyButton, downloadLink, deleteButton);
     head.append(date, actions);
 
+    const userText = document.createElement('p');
+    userText.className = 'art-usertext';
+    userText.textContent = item.userText ? `“${item.userText}”` : '旧记录 · 未保存原始输入';
+    userText.title = item.userText || '';
+
     const prompt = document.createElement('p');
     prompt.className = 'art-prompt';
     prompt.textContent = item.prompt || '（无提示词记录）';
@@ -1791,7 +2616,7 @@
     });
     card.addEventListener('drop', (event) => dropOnCard(event, item, card));
 
-    body.append(head, prompt, meta, albumRow);
+    body.append(head, userText, prompt, meta, albumRow);
     card.append(selectButton, thumb, body);
     return card;
   }
@@ -1812,6 +2637,10 @@
   }
 
   function refreshSelectionUI() {
+    if (state.viewMode === 'records') {
+      ui.selectionBar.hidden = true;
+      return;
+    }
     const known = new Set(state.history.map((item) => item.id));
     for (const id of [...state.selected]) {
       if (!known.has(id)) state.selected.delete(id);
@@ -1954,6 +2783,7 @@
       applyAlbumsFromPayload(payload);
       state.selected.clear();
       renderGallery();
+      refreshActiveRecordDialog();
       if (ui.lightbox.open && state.activeItem) {
         refreshLightboxState(state.activeItem, { preserveEdits: true });
       }
@@ -1997,6 +2827,7 @@
       for (const id of removed) state.selected.delete(id);
       applyAlbumsFromPayload(payload);
       renderGallery();
+      refreshActiveRecordDialog();
       loadTrash().catch(() => {});
 
       if (successMessage) {
@@ -2145,6 +2976,7 @@
       const [, count] = await Promise.all([
         loadAlbums(),
         loadHistory(),
+        loadRecords(),
         loadTrash(),
         loadPrompts(),
         loadJobs(),
@@ -2188,6 +3020,7 @@
         renderAlbums();
       });
       renderGallery();
+      refreshActiveRecordDialog();
       if (ui.lightbox.open) refreshLightboxState(updated, { preserveEdits: true });
 
       showToast(
@@ -2315,6 +3148,7 @@
       state.selected.delete(item.id);
       renderAlbums();
       renderGallery();
+      refreshActiveRecordDialog();
       loadTrash().catch(() => {});
       loadAlbums().catch(() => {});
 
@@ -2465,6 +3299,7 @@
       renderTrashList();
       renderAlbums();
       renderGallery();
+      refreshActiveRecordDialog();
       showToast('已恢复到画廊。', 'success', 2600);
     } catch (error) {
       showToast(error.message || '恢复失败。', 'error');
@@ -3003,6 +3838,10 @@
       ? `NovelAI 作品：${item.prompt.slice(0, 120)}`
       : 'NovelAI 生成图片';
     ui.lightboxDate.textContent = formatFullDate(item.createdAt);
+    const userText = asText(item.userText).trim();
+    ui.lightboxOriginal.classList.toggle('is-empty', !userText);
+    ui.lightboxOriginalText.textContent = userText || '旧记录未保存原始输入。';
+    ui.lightboxReuseText.disabled = !userText;
     ui.lightboxChips.replaceChildren(...buildLightboxChips(item));
     if (!preserveEdits) {
       ui.lightboxPromptEdit.value = item.prompt || '';
@@ -3068,6 +3907,17 @@
     }
   }
 
+  function setLightboxZoom(zoomed) {
+    const active = Boolean(zoomed);
+    ui.lightbox.classList.toggle('is-zoom', active);
+    ui.lightboxImage.title = active ? '点击退出全屏' : '点击全屏查看原图';
+    ui.lightboxImage.setAttribute('aria-pressed', String(active));
+  }
+
+  function toggleLightboxZoom() {
+    setLightboxZoom(!ui.lightbox.classList.contains('is-zoom'));
+  }
+
   function openLightbox(item) {
     state.lightboxItems = lightboxListFor(item);
     let index = state.lightboxItems.findIndex((entry) => entry.id === item.id);
@@ -3076,6 +3926,7 @@
       index = 0;
     }
     state.lightboxIndex = index;
+    setLightboxZoom(false);
     showLightboxItem(state.lightboxItems[index]);
 
     if (!ui.lightbox.open) {
@@ -3144,7 +3995,7 @@
     ui.sidebar.classList.toggle('is-open', open);
     ui.sidebarBackdrop.classList.toggle('is-visible', open);
     document.body.classList.toggle('sidebar-open', open);
-    ui.sidebarToggle.setAttribute('aria-expanded', String(open));
+    updateSidebarToggleLabel();
 
     if (open && focusClose) {
       window.setTimeout(() => ui.sidebarClose.focus(), 80);
@@ -3231,7 +4082,7 @@
       : 'queued';
     return {
       id: raw.id,
-      kind: raw.kind === 'rerender' ? 'rerender' : 'generate',
+      kind: ['rerender', 'reroll', 'render'].includes(raw.kind) ? raw.kind : 'generate',
       label: asText(raw.label, '任务'),
       status,
       stage: asText(raw.stage),
@@ -3240,6 +4091,8 @@
       albumId: asText(raw.albumId) || null,
       text: asText(raw.text),
       historyId: asText(raw.historyId),
+      recordId: asText(raw.recordId),
+      variantId: asText(raw.variantId),
       createdAt: Number(raw.createdAt) || Date.now(),
       startedAt: Number(raw.startedAt) || 0,
       finishedAt: Number(raw.finishedAt) || 0,
@@ -3333,6 +4186,22 @@
 
   function handleFinishedJob(job) {
     if (job.status === 'done' && job.result) {
+      state.lastFinishedJobId = job.id;
+
+      if (job.kind === 'reroll') {
+        const record = job.result.record;
+        showToast(
+          `新的 Tag 版本已生成${record ? ` · 共 ${record.variantCount} 版` : ''}，可并排对比。`,
+          'success',
+          4200,
+        );
+        loadRecords().catch(() => {});
+        setStage('success', 'Tag 重 roll 完成 · 可以并排对比', formatDuration(job.elapsedMs));
+        setProgress(100, true);
+        scheduleProgressHide();
+        return;
+      }
+
       try {
         appendGeneratedCard(job.result);
       } catch (error) {
@@ -3341,7 +4210,6 @@
 
       const albumId = job.result.albumId;
       const targetName = albumId ? albumName(albumId) : '未分类';
-      state.lastFinishedJobId = job.id;
 
       if (job.kind === 'rerender') {
         showToast(
@@ -3351,6 +4219,12 @@
         );
         const created = state.history.find((entry) => entry.id === state.lastCreatedId);
         if (created) window.setTimeout(() => openLightbox(created), 240);
+      } else if (job.kind === 'render') {
+        showToast(
+          `记录生图完成 · 新图已追加到对应 Tag 版本${albumId ? ` · 画册「${targetName}」` : ''}。`,
+          'success',
+          3600,
+        );
       } else {
         showToast(
           albumId
@@ -3361,9 +4235,14 @@
         );
       }
 
+      loadRecords().catch(() => {});
       setStage(
         'success',
-        job.kind === 'rerender' ? '重画完成 · 新图已自动打开' : '生成完成 · 图片已保存',
+        job.kind === 'rerender'
+          ? '重画完成 · 新图已自动打开'
+          : job.kind === 'render'
+            ? '记录生图完成 · 新图已追加'
+            : '生成完成 · 图片已保存',
         formatDuration(job.elapsedMs),
       );
       setProgress(100, true);
@@ -3376,6 +4255,9 @@
       setStage('idle', '已取消生成 · 可以继续排队或调整提示词', 'CANCELED');
       setProgress(0, false);
       stopElapsedTimer();
+      if (job.recordId && ui.recordDialog.open && state.activeRecordId) {
+        renderRecordDialog(state.activeRecordId);
+      }
       return;
     }
 
@@ -3385,6 +4267,9 @@
       setStage('error', message, 'FAILED');
       setProgress(0, false);
       stopElapsedTimer();
+      if (job.recordId && ui.recordDialog.open && state.activeRecordId) {
+        renderRecordDialog(state.activeRecordId);
+      }
     }
   }
 
@@ -3477,12 +4362,19 @@
     const finished = state.jobs.filter(
       (job) => !isActiveJob(job) && state.sessionJobIds.has(job.id),
     );
-    const rows = [
-      ...active,
-      ...finished.slice(0, Math.max(0, MAX_QUEUE_ROWS - active.length)),
-    ];
+    const rows =
+      active.length > 0
+        ? [
+            ...active,
+            ...finished.slice(0, Math.max(0, MAX_QUEUE_ROWS - active.length)),
+          ]
+        : [];
 
+    const wasHidden = ui.queuePanel.hidden;
     ui.queuePanel.hidden = rows.length === 0;
+    if (wasHidden && rows.length > 0 && active.length > 0) {
+      setQueueCollapsed(false);
+    }
     ui.queueCount.textContent = String(active.length);
     const queuedCount = state.jobs.filter((job) => job.status === 'queued').length;
     ui.queueCancelAll.hidden = queuedCount === 0;
@@ -3507,14 +4399,25 @@
 
       const label = document.createElement('span');
       label.className = 'queue-item-label';
-      label.textContent = job.kind === 'rerender' ? '重画' : '文生图';
+      label.textContent =
+        job.kind === 'rerender'
+          ? '重画'
+          : job.kind === 'reroll'
+            ? '重 Roll'
+            : job.kind === 'render'
+              ? '记录生图'
+              : '文生图';
 
       const text = document.createElement('span');
       text.className = 'queue-item-text';
       text.textContent =
         job.kind === 'rerender'
           ? '历史作品重画'
-          : job.text || '（无描述）';
+          : job.kind === 'reroll'
+            ? '重新生成 Tag 版本'
+            : job.kind === 'render'
+              ? '按已有 Tag 版本生图'
+              : job.text || '（无描述）';
       text.title = job.text || text.textContent;
       top.append(label, text);
 
@@ -3635,8 +4538,17 @@
 
   function updateComposerMetrics() {
     ui.charCount.textContent = `${ui.promptInput.value.length} / ${MAX_CHARS}`;
-    ui.promptInput.style.height = 'auto';
-    ui.promptInput.style.height = `${Math.min(ui.promptInput.scrollHeight, 156)}px`;
+    const input = ui.promptInput;
+    if (!input.value) {
+      input.style.height = '';
+      return;
+    }
+    const compactCap = window.innerHeight <= 720 ? 96 : 128;
+    const cap = state.composerExpanded
+      ? Math.min(window.innerHeight * 0.46, 520)
+      : compactCap;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, cap)}px`;
   }
 
   async function handleGenerate() {
@@ -3798,6 +4710,9 @@
     ui.naiPreset.addEventListener('change', handleNaiPresetChange);
     ui.naiPresetSave.addEventListener('click', handleNaiPresetSave);
     ui.naiPresetDelete.addEventListener('click', handleNaiPresetDelete);
+    ui.naiPresetExport.addEventListener('click', handleNaiPresetExport);
+    ui.naiPresetImport.addEventListener('click', () => ui.naiPresetFile.click());
+    ui.naiPresetFile.addEventListener('change', handleNaiPresetImportFile);
 
     // Preset naming dialog.
     ui.presetDialogForm.addEventListener('submit', handlePresetDialogSubmit);
@@ -3878,19 +4793,83 @@
         handleGenerate();
       }
     });
+    ui.composerExpand.addEventListener('click', () => {
+      setComposerExpanded(!state.composerExpanded);
+    });
     updateComposerMetrics();
 
     ui.generateBtn.addEventListener('click', handleGenerate);
     ui.cancelJob.addEventListener('click', cancelRunningJob);
     ui.queueCancelAll.addEventListener('click', cancelAllQueuedJobs);
+    ui.queueToggle.addEventListener('click', () => {
+      setQueueCollapsed(!state.queueCollapsed);
+    });
 
     // Gallery actions.
     ui.refreshHistory.addEventListener('click', handleRefreshHistory);
+    ui.galleryDensity.addEventListener('click', toggleGalleryDensity);
+    ui.galleryView.addEventListener('click', toggleGalleryView);
     ui.albumNew.addEventListener('click', handleCreateAlbum);
     ui.albumRename.addEventListener('click', handleRenameAlbum);
     ui.albumDelete.addEventListener('click', handleDeleteAlbum);
     ui.galleryClear.addEventListener('click', handleClearGallery);
     ui.exportMetadata.addEventListener('click', handleExportMetadata);
+
+    // Prompt pencils: open one shared large editor and write back on save.
+    document.querySelectorAll('.prompt-pencil[data-editor-target]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = document.getElementById(button.dataset.editorTarget || '');
+        if (!target) return;
+        const maxLength = Number(target.getAttribute('maxlength')) || 0;
+        openTextEditor({
+          title: button.getAttribute('aria-label') || '编辑提示词',
+          help: '在大编辑器中修改；保存后写回原来的提示词字段。',
+          value: target.value,
+          maxLength,
+          onSave: (value) => {
+            target.value = value;
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+          },
+        });
+      });
+    });
+
+    // Shared text editor.
+    ui.textEditorForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitTextEditor();
+    });
+    ui.textEditorCancel.addEventListener('click', closeTextEditor);
+    ui.textEditorClose.addEventListener('click', closeTextEditor);
+    ui.textEditorDialog.addEventListener('click', (event) => {
+      if (event.target === ui.textEditorDialog) closeTextEditor();
+    });
+    ui.textEditorDialog.addEventListener('close', () => {
+      state.textEditorSave = null;
+    });
+    ui.textEditorInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        submitTextEditor();
+      }
+    });
+
+    // Record detail dialog.
+    ui.recordClose.addEventListener('click', closeRecordDialog);
+    ui.recordDialog.addEventListener('click', (event) => {
+      if (event.target === ui.recordDialog) closeRecordDialog();
+    });
+    ui.recordDialog.addEventListener('close', () => {
+      state.activeRecordId = '';
+    });
+    ui.recordReuseText.addEventListener('click', () => {
+      const record = state.records.find((entry) => entry.id === state.activeRecordId);
+      if (record) reuseUserText(record.userText);
+    });
+    ui.recordReroll.addEventListener('click', handleRecordReroll);
+    ui.lightboxReuseText.addEventListener('click', () => {
+      if (state.activeItem) reuseUserText(state.activeItem.userText);
+    });
 
     // Batch selection.
     ui.selectionAll.addEventListener('click', selectAllVisible);
@@ -3946,23 +4925,56 @@
     ui.tagWeightReset.addEventListener('click', resetTagWeights);
     ui.lightboxPrev.addEventListener('click', () => stepLightbox(-1));
     ui.lightboxNext.addEventListener('click', () => stepLightbox(1));
+    ui.lightboxImage.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleLightboxZoom();
+    });
+    ui.lightboxImage.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggleLightboxZoom();
+    });
+    ui.lightboxVisual.addEventListener('click', (event) => {
+      if (event.target === ui.lightboxVisual && ui.lightbox.classList.contains('is-zoom')) {
+        closeLightbox();
+      }
+    });
     ui.lightbox.addEventListener('click', (event) => {
       if (event.target === ui.lightbox) closeLightbox();
     });
+    ui.lightbox.addEventListener('cancel', (event) => {
+      if (!ui.lightbox.classList.contains('is-zoom')) return;
+      event.preventDefault();
+      setLightboxZoom(false);
+    });
     ui.lightbox.addEventListener('close', () => {
+      setLightboxZoom(false);
       state.activeItem = null;
     });
 
-    // Drawer (small screens).
-    ui.sidebarToggle.addEventListener('click', () => setSidebar(true));
+    // Drawer / desktop rail.
+    ui.sidebarToggle.addEventListener('click', () => {
+      if (window.innerWidth > 900) {
+        applySidebarCollapsed(!state.sidebarCollapsed, { persist: true });
+      } else {
+        setSidebar(true);
+      }
+    });
+    ui.focusToggle.addEventListener('click', () => setFocusMode(!state.focusMode));
     ui.sidebarClose.addEventListener('click', () => setSidebar(false));
     ui.sidebarBackdrop.addEventListener('click', () => setSidebar(false));
-    ui.sidebarToggle.setAttribute('aria-expanded', 'false');
+    updateSidebarToggleLabel();
 
     window.addEventListener('resize', () => {
       if (window.innerWidth > 900 && ui.sidebar.classList.contains('is-open')) {
         setSidebar(false);
       }
+      updateSidebarToggleLabel();
+      if (!state.galleryDensityManual) {
+        applyGalleryDensity(defaultGalleryDensity());
+      }
+      updateComposerMetrics();
     });
 
     // Shortcuts.
@@ -3970,6 +4982,16 @@
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         handleSave();
+        return;
+      }
+      if (
+        event.key === 'Escape' &&
+        ui.lightbox.open &&
+        ui.lightbox.classList.contains('is-zoom')
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        setLightboxZoom(false);
         return;
       }
       if (
@@ -3988,6 +5010,14 @@
         ui.sidebar.classList.contains('is-open')
       ) {
         setSidebar(false);
+        return;
+      }
+      if (event.key === 'Escape' && !ui.lightbox.open && state.focusMode) {
+        setFocusMode(false);
+        return;
+      }
+      if (event.key === 'Escape' && !ui.lightbox.open && state.composerExpanded) {
+        setComposerExpanded(false);
       }
     });
   }
@@ -3998,6 +5028,7 @@
 
   async function init() {
     cacheElements();
+    initLayoutPreferences();
     setModelSuggestions(MODEL_SUGGESTIONS);
     renderPromptBlocks();
     renderPresetSelect();
@@ -4006,15 +5037,23 @@
     syncRangeDisplays();
     updateResolutionPreset();
 
-    const [configResult, historyResult, albumsResult, trashResult, promptsResult, jobsResult] =
-      await Promise.allSettled([
-        loadConfig(),
-        loadHistory(),
-        loadAlbums(),
-        loadTrash(),
-        loadPrompts(),
-        loadJobs(),
-      ]);
+    const [
+      configResult,
+      historyResult,
+      recordsResult,
+      albumsResult,
+      trashResult,
+      promptsResult,
+      jobsResult,
+    ] = await Promise.allSettled([
+      loadConfig(),
+      loadHistory(),
+      loadRecords(),
+      loadAlbums(),
+      loadTrash(),
+      loadPrompts(),
+      loadJobs(),
+    ]);
 
     state.loaded = true;
 

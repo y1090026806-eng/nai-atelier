@@ -21,7 +21,7 @@ const AdmZip = require('adm-zip');
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
@@ -33,6 +33,7 @@ const OUTPUTS_DIR = process.env.OUTPUTS_DIR
   : path.join(ROOT_DIR, 'outputs');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const RECORDS_FILE = path.join(DATA_DIR, 'records.json');
 const ALBUMS_FILE = path.join(DATA_DIR, 'albums.json');
 const TRASH_FILE = path.join(DATA_DIR, 'trash.json');
 const PROMPTS_FILE = path.join(DATA_DIR, 'prompts.json');
@@ -48,6 +49,9 @@ const DEFAULT_NAI_TIMEOUT_SECONDS = 300;
 const MODEL_LIST_TIMEOUT_MS = 30_000;
 const MAX_HISTORY = 200;
 const MAX_INPUT_CHARS = 4_000;
+const MAX_RECORDS = 1_000;
+const MAX_VARIANTS_PER_RECORD = 30;
+const MAX_RECORD_TITLE = 80;
 const MAX_ALBUMS = 60;
 const MAX_ALBUM_NAME = 40;
 const MAX_RERENDER_PROMPT = 30_000;
@@ -592,7 +596,88 @@ function normalizeLlmTags(rawContent) {
   return result;
 }
 
-function buildChatMessages(llm, userText) {
+const TITLE_FORMAT_HINT = [
+  '在保持原有标签输出格式的前提下，另外给出一个简短中文标题。',
+  '如果输出纯文本标签，请在最后另起一行写 `TITLE: <标题>`；',
+  '如果输出 JSON，请增加 `"title": "<标题>"` 字段。',
+  '标题不超过 24 个汉字，不要解释。',
+].join('\n');
+
+function cleanRecordTitle(value) {
+  return asString(value, '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/^["'`“”]+|["'`“”]+$/g, '')
+    .replace(/^(?:TITLE|Title|标题)\s*[:：]\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_RECORD_TITLE);
+}
+
+function fallbackRecordTitle(userText, tags = '') {
+  const text = asString(userText, '').replace(/\s+/g, ' ').trim();
+  if (text) {
+    return text
+      .slice(0, 40)
+      .replace(/[，。！？,!?；;：:、\s]+$/g, '')
+      .trim() || '未命名记录';
+  }
+  const firstTags = promptTags(tags).slice(0, 3).join(', ');
+  return firstTags.slice(0, 40) || '旧作品';
+}
+
+function parseLlmOutput(rawContent, userText) {
+  if (typeof rawContent !== 'string' || !rawContent.trim()) {
+    throw new AppError('LLM 返回了空内容，未获得可用标签。', 502, 'LLM_EMPTY_RESPONSE');
+  }
+
+  let text = rawContent.replace(/\r\n?/g, '\n').trim();
+  text = text.replace(/```[a-zA-Z0-9_-]*\s*/g, '').replace(/```/g, '');
+
+  // Some models follow the title instruction by switching to JSON.
+  const jsonStart = text.indexOf('{');
+  const jsonEnd = text.lastIndexOf('}');
+  if (jsonStart >= 0 && jsonEnd > jsonStart) {
+    try {
+      const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+      if (isPlainObject(parsed) && (parsed.tags !== undefined || parsed.title !== undefined)) {
+        const rawTags = Array.isArray(parsed.tags)
+          ? parsed.tags.join(', ')
+          : typeof parsed.tags === 'string'
+            ? parsed.tags
+            : '';
+        const tags = normalizeLlmTags(rawTags);
+        const title =
+          cleanRecordTitle(parsed.title) || fallbackRecordTitle(userText, tags);
+        return { title, tags };
+      }
+    } catch {
+      // Fall through to the plain-text parser.
+    }
+  }
+
+  let tagText = text;
+  const titleMatch = tagText.match(
+    /(?:^|\n)\s*(?:TITLE|Title|标题)\s*[:：]\s*([^\n]+)/,
+  );
+  let title = '';
+  if (titleMatch) {
+    title = cleanRecordTitle(titleMatch[1]);
+    tagText = tagText.replace(titleMatch[0], '\n');
+  }
+
+  const tagsMatch = tagText.match(/(?:^|\n)\s*(?:TAGS|Tags|标签|英文标签)\s*[:：]\s*/);
+  if (tagsMatch) {
+    tagText = tagText.slice(tagsMatch.index + tagsMatch[0].length);
+  }
+
+  const tags = normalizeLlmTags(tagText);
+  return {
+    title: title || fallbackRecordTitle(userText, tags),
+    tags,
+  };
+}
+
+function buildChatMessages(llm, userText, { titleHint = '' } = {}) {
   const before = [];
   const after = [];
 
@@ -606,7 +691,8 @@ function buildChatMessages(llm, userText) {
     else before.push(message);
   }
 
-  return [...before, { role: 'user', content: userText }, ...after];
+  const userContent = titleHint ? `${userText}\n\n${titleHint}` : userText;
+  return [...before, { role: 'user', content: userContent }, ...after];
 }
 
 async function generateTagsWithOpenAi(llm, userText, signal) {
@@ -622,7 +708,7 @@ async function generateTagsWithOpenAi(llm, userText, signal) {
       url,
       {
         model: llm.model,
-        messages: buildChatMessages(llm, userText),
+        messages: buildChatMessages(llm, userText, { titleHint: TITLE_FORMAT_HINT }),
         temperature: llm.temperature,
         top_p: llm.topP,
         max_tokens: llm.maxTokens,
@@ -680,7 +766,7 @@ async function generateTagsWithOpenAi(llm, userText, signal) {
     );
   }
 
-  return normalizeLlmTags(text);
+  return parseLlmOutput(text, userText);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1091,6 +1177,9 @@ function buildMetadataSnapshot(item) {
     url: item.url,
     albumId: item.albumId,
     parentId: item.parentId,
+    recordId: item.recordId || '',
+    variantId: item.variantId || '',
+    userText: item.userText || '',
     prompt: item.prompt,
     llmTags: item.llmTags,
     negativePrompt: item.negativePrompt,
@@ -1205,6 +1294,7 @@ function buildMetadataArchive() {
 
 let activeConfig = normalizeConfig(DEFAULT_CONFIG);
 let historyItems = [];
+let records = [];
 let albums = [];
 let trashItems = [];
 let prompts = [];
@@ -1373,6 +1463,9 @@ function normalizeHistoryRecord(raw) {
     url: buildImageUrl(relativePath),
     albumId,
     parentId: asString(raw.parentId, '').trim().slice(0, 80) || '',
+    recordId: asString(raw.recordId, '').trim().slice(0, 80),
+    variantId: asString(raw.variantId, '').trim().slice(0, 80),
+    userText: asString(raw.userText, '').slice(0, MAX_INPUT_CHARS),
     prompt: asString(raw.prompt, '').slice(0, MAX_RERENDER_PROMPT),
     llmTags: asString(raw.llmTags, '').slice(0, 8_000),
     negativePrompt: asString(raw.negativePrompt, '').slice(0, 8_000),
@@ -1391,6 +1484,296 @@ function normalizeHistoryRecord(raw) {
     createdAt: Number.isNaN(createdAt.getTime()) ? new Date().toISOString() : createdAt.toISOString(),
     elapsedMs: clampInt(raw.elapsedMs, 0, 0, 3_600_000),
   };
+}
+
+function normalizeTextKey(value) {
+  return asString(value, '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function normalizeRecordVariant(raw) {
+  if (!isPlainObject(raw)) return null;
+  const llmTags = asString(raw.llmTags, '').slice(0, 8_000);
+  if (!llmTags.trim()) return null;
+  const id = asString(raw.id, '').trim().slice(0, 80) || crypto.randomUUID();
+  const source = ['llm', 'manual', 'legacy'].includes(raw.source) ? raw.source : 'llm';
+  const createdAt = new Date(asString(raw.createdAt, ''));
+  const updatedAt = new Date(asString(raw.updatedAt, ''));
+  return {
+    id,
+    title: cleanRecordTitle(raw.title),
+    llmTags,
+    source,
+    llmModel: asString(raw.llmModel, '').slice(0, 200),
+    createdAt: Number.isNaN(createdAt.getTime()) ? new Date().toISOString() : createdAt.toISOString(),
+    updatedAt: Number.isNaN(updatedAt.getTime()) ? new Date().toISOString() : updatedAt.toISOString(),
+  };
+}
+
+function normalizeRecord(raw) {
+  if (!isPlainObject(raw)) return null;
+  const userText = asString(raw.userText, '').slice(0, MAX_INPUT_CHARS);
+  const variants = [];
+  const seen = new Set();
+  for (const row of Array.isArray(raw.variants) ? raw.variants : []) {
+    if (variants.length >= MAX_VARIANTS_PER_RECORD) break;
+    const variant = normalizeRecordVariant(row);
+    if (!variant || seen.has(variant.id)) continue;
+    seen.add(variant.id);
+    variants.push(variant);
+  }
+  if (variants.length === 0) return null;
+
+  const createdAt = new Date(asString(raw.createdAt, ''));
+  const updatedAt = new Date(asString(raw.updatedAt, ''));
+  return {
+    id: asString(raw.id, '').trim().slice(0, 80) || crypto.randomUUID(),
+    userText,
+    textKey: normalizeTextKey(userText) || asString(raw.textKey, '').trim().slice(0, MAX_INPUT_CHARS),
+    createdAt: Number.isNaN(createdAt.getTime()) ? new Date().toISOString() : createdAt.toISOString(),
+    updatedAt: Number.isNaN(updatedAt.getTime()) ? new Date().toISOString() : updatedAt.toISOString(),
+    variants,
+  };
+}
+
+function normalizeRecordList(rawRows) {
+  const rows = Array.isArray(rawRows)
+    ? rawRows
+    : Array.isArray(rawRows?.records)
+      ? rawRows.records
+      : [];
+  const result = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const record = normalizeRecord(row);
+    if (!record || seen.has(record.id)) continue;
+    seen.add(record.id);
+    result.push(record);
+  }
+  return result;
+}
+
+function findRecordById(recordId) {
+  return records.find((record) => record.id === recordId) || null;
+}
+
+function findRecordByText(userText) {
+  const key = normalizeTextKey(userText);
+  if (!key) return null;
+  return records.find((record) => record.textKey === key) || null;
+}
+
+function recordImages(recordId) {
+  return historyItems.filter((item) => item.recordId === recordId);
+}
+
+function recordDisplayTitle(record, variant = null) {
+  const chosen = variant || record?.variants?.[0];
+  return (
+    cleanRecordTitle(chosen?.title) ||
+    fallbackRecordTitle(record?.userText, chosen?.llmTags) ||
+    '未命名记录'
+  );
+}
+
+function publicRecord(record) {
+  const images = recordImages(record.id).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  );
+  const countByVariant = new Map();
+  for (const item of images) {
+    countByVariant.set(item.variantId, (countByVariant.get(item.variantId) || 0) + 1);
+  }
+  return {
+    id: record.id,
+    userText: record.userText,
+    title: recordDisplayTitle(record),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    variants: record.variants.map((variant) => ({
+      ...clone(variant),
+      title: recordDisplayTitle(record, variant),
+      imageCount: countByVariant.get(variant.id) || 0,
+    })),
+    variantCount: record.variants.length,
+    imageCount: images.length,
+    coverId: images[0]?.id || '',
+    coverUrl: images[0]?.url || '',
+    latestImageAt: images[0]?.createdAt || '',
+    albumIds: [...new Set(images.map((item) => item.albumId).filter(Boolean))],
+  };
+}
+
+function publicRecordList() {
+  return records
+    .map(publicRecord)
+    .sort((a, b) => {
+      const aTime = new Date(a.updatedAt || a.latestImageAt || a.createdAt).getTime();
+      const bTime = new Date(b.updatedAt || b.latestImageAt || b.createdAt).getTime();
+      return bTime - aTime;
+    });
+}
+
+async function persistRecords() {
+  const snapshot = clone(records);
+  await queueWrite(() => atomicWriteJson(RECORDS_FILE, snapshot));
+}
+
+function makeRecordVariant({ title, llmTags, source = 'llm', llmModel = '', createdAt }) {
+  const now = createdAt || new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    title: cleanRecordTitle(title) || fallbackRecordTitle('', llmTags),
+    llmTags: asString(llmTags, '').slice(0, 8_000),
+    source: ['llm', 'manual', 'legacy'].includes(source) ? source : 'llm',
+    llmModel: asString(llmModel, '').slice(0, 200),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+async function createRecordWithVariant(userText, { title, llmTags, source = 'llm', llmModel = '' }) {
+  if (records.length >= MAX_RECORDS) {
+    // Prefer dropping old records that no longer own any image.
+    const removable = records.filter((record) => recordImages(record.id).length === 0);
+    for (const record of removable) {
+      const index = records.indexOf(record);
+      if (index >= 0) records.splice(index, 1);
+      if (records.length < MAX_RECORDS) break;
+    }
+    if (records.length >= MAX_RECORDS) {
+      throw new AppError('记录数量已达到上限。', 409, 'RECORD_LIMIT');
+    }
+  }
+
+  const now = new Date().toISOString();
+  const variant = makeRecordVariant({ title, llmTags, source, llmModel, createdAt: now });
+  const record = {
+    id: crypto.randomUUID(),
+    userText: asString(userText, '').slice(0, MAX_INPUT_CHARS),
+    textKey: normalizeTextKey(userText),
+    createdAt: now,
+    updatedAt: now,
+    variants: [variant],
+  };
+  records.unshift(record);
+  await persistRecords();
+  return { record, variant };
+}
+
+async function appendRecordVariant(record, { title, llmTags, source = 'llm', llmModel = '' }) {
+  if (record.variants.length >= MAX_VARIANTS_PER_RECORD) {
+    throw new AppError(
+      `同一条记录最多保存 ${MAX_VARIANTS_PER_RECORD} 个 Tag 版本。`,
+      409,
+      'VARIANT_LIMIT',
+    );
+  }
+  const variant = makeRecordVariant({ title, llmTags, source, llmModel });
+  record.variants.push(variant);
+  record.updatedAt = new Date().toISOString();
+  await persistRecords();
+  return variant;
+}
+
+async function updateRecordVariant(recordId, variantId, payload) {
+  const record = findRecordById(recordId);
+  if (!record) {
+    throw new AppError('没有找到这条记录，可能已被清理。', 404, 'RECORD_NOT_FOUND');
+  }
+  const variant = record.variants.find((entry) => entry.id === variantId);
+  if (!variant) {
+    throw new AppError('没有找到这个 Tag 版本。', 404, 'VARIANT_NOT_FOUND');
+  }
+  const body = isPlainObject(payload) ? payload : {};
+  if (Object.prototype.hasOwnProperty.call(body, 'title')) {
+    variant.title = cleanRecordTitle(body.title) || fallbackRecordTitle('', variant.llmTags);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'llmTags')) {
+    const tags = asString(body.llmTags, '').slice(0, 8_000).trim();
+    if (!tags) {
+      throw new AppError('Tag 提示词不能为空。', 400, 'EMPTY_TAGS');
+    }
+    variant.llmTags = tags;
+  }
+  variant.updatedAt = new Date().toISOString();
+  record.updatedAt = variant.updatedAt;
+  await persistRecords();
+  return { record, variant };
+}
+
+function ensureRecordForHistoryItem(item) {
+  let changed = false;
+  let record = item.recordId ? findRecordById(item.recordId) : null;
+  if (record) {
+    let variant = item.variantId
+      ? record.variants.find((entry) => entry.id === item.variantId)
+      : null;
+    if (!variant) {
+      variant = record.variants[0];
+      if (!variant) {
+        variant = makeRecordVariant({
+          title: fallbackRecordTitle('', item.llmTags),
+          llmTags: item.llmTags || item.prompt,
+          source: 'legacy',
+          llmModel: item.llmModel,
+          createdAt: item.createdAt,
+        });
+        record.variants.push(variant);
+      }
+      item.variantId = variant.id;
+      changed = true;
+    }
+    if (!item.recordId) {
+      item.recordId = record.id;
+      changed = true;
+    }
+    if (item.userText !== record.userText) {
+      item.userText = record.userText;
+      changed = true;
+    }
+    return { record, variant, changed };
+  }
+
+  const createdAt = item.createdAt || new Date().toISOString();
+  const variant = makeRecordVariant({
+    title: fallbackRecordTitle('', item.llmTags),
+    llmTags: item.llmTags || item.prompt,
+    source: 'legacy',
+    llmModel: item.llmModel,
+    createdAt,
+  });
+  record = {
+    id: crypto.randomUUID(),
+    userText: '',
+    textKey: '',
+    createdAt,
+    updatedAt: createdAt,
+    variants: [variant],
+  };
+  records.push(record);
+  item.recordId = record.id;
+  item.variantId = variant.id;
+  item.userText = '';
+  return { record, variant, changed: true };
+}
+
+async function migrateHistoryRecords() {
+  let historyChanged = false;
+  let recordsChanged = false;
+  for (const item of historyItems) {
+    const beforeRecord = item.recordId;
+    const beforeVariant = item.variantId;
+    const beforeText = item.userText;
+    const result = ensureRecordForHistoryItem(item);
+    if (result.changed || result.record.createdAt === result.record.updatedAt) {
+      recordsChanged = true;
+    }
+    if (item.recordId !== beforeRecord || item.variantId !== beforeVariant || item.userText !== beforeText) {
+      historyChanged = true;
+    }
+  }
+  if (historyChanged) await persistHistory();
+  if (recordsChanged) await persistRecords();
 }
 
 async function initializeStorage() {
@@ -1432,6 +1815,9 @@ async function initializeStorage() {
       ? rawHistory.items
       : [];
 
+  const rawRecords = await readJsonFile(RECORDS_FILE, []);
+  records = normalizeRecordList(rawRecords);
+
   const restored = [];
   for (const row of rows) {
     const record = normalizeHistoryRecord(row);
@@ -1465,6 +1851,8 @@ async function initializeStorage() {
   }
 
   historyItems = restored.slice(0, MAX_HISTORY);
+
+  await migrateHistoryRecords();
 
   // Drop album covers that point at a record that no longer exists.
   let coversChanged = false;
@@ -2363,6 +2751,9 @@ function makeHistoryRecord({
   relativePath,
   albumId = null,
   parentId = '',
+  recordId = '',
+  variantId = '',
+  userText = '',
   prompt,
   llmTags,
   novai,
@@ -2379,6 +2770,9 @@ function makeHistoryRecord({
     url: buildImageUrl(safeRelativePath),
     albumId,
     parentId,
+    recordId,
+    variantId,
+    userText,
     prompt,
     llmTags,
     negativePrompt: novai.negativePrompt,
@@ -2410,25 +2804,51 @@ function resolveTargetAlbumId(rawValue) {
 async function runGeneration(userText, onStage = () => {}, { albumId = null, signal } = {}) {
   const startedAt = Date.now();
   const cfg = clone(activeConfig);
+  const text = asString(userText, '').trim();
 
-  if (!cfg.llm.apiKey) {
-    throw new AppError('还没有配置 LLM API Key，请先在左侧填写并保存。', 400, 'LLM_API_KEY_MISSING');
-  }
   if (!cfg.novelai.apiKey) {
     throw new AppError('还没有配置 NovelAI API Key，请先在左侧填写并保存。', 400, 'NAI_API_KEY_MISSING');
   }
 
   const targetAlbumId = resolveTargetAlbumId(albumId);
+  let record = findRecordByText(text);
+  let variant = record?.variants?.[record.variants.length - 1] || null;
+  let usedExistingVariant = Boolean(record && variant && variant.llmTags);
 
-  emitStage(onStage, {
-    stage: 'llm',
-    message: '正在请求 LLM 生成 Danbooru 标签…',
-    progress: 15,
-  });
+  if (!usedExistingVariant) {
+    if (!cfg.llm.apiKey) {
+      throw new AppError('还没有配置 LLM API Key，请先在左侧填写并保存。', 400, 'LLM_API_KEY_MISSING');
+    }
 
-  const llmTags = await generateTagsWithOpenAi(cfg.llm, userText, signal);
-  const finalPrompt = buildFinalPrompt(cfg.novelai, llmTags);
+    emitStage(onStage, {
+      stage: 'llm',
+      message: '正在请求 LLM 生成 Danbooru 标签…',
+      progress: 15,
+    });
 
+    const generated = await generateTagsWithOpenAi(cfg.llm, text, signal);
+    if (record) {
+      variant = await appendRecordVariant(record, {
+        title: generated.title,
+        llmTags: generated.tags,
+        llmModel: cfg.llm.model,
+      });
+    } else {
+      ({ record, variant } = await createRecordWithVariant(text, {
+        title: generated.title,
+        llmTags: generated.tags,
+        llmModel: cfg.llm.model,
+      }));
+    }
+  } else {
+    emitStage(onStage, {
+      stage: 'nai',
+      message: '已匹配到同名记录，沿用当前 Tag 版本生成新图…',
+      progress: 25,
+    });
+  }
+
+  const finalPrompt = buildFinalPrompt(cfg.novelai, variant.llmTags);
   if (!finalPrompt) {
     throw new AppError('最终提示词为空，请检查基础提示词与 LLM 输出。', 400, 'EMPTY_PROMPT');
   }
@@ -2440,28 +2860,134 @@ async function runGeneration(userText, onStage = () => {}, { albumId = null, sig
     { albumId: targetAlbumId, signal },
   );
 
-  const record = makeHistoryRecord({
+  const recordItem = makeHistoryRecord({
     filename,
     relativePath,
     albumId: targetAlbumId,
+    recordId: record.id,
+    variantId: variant.id,
+    userText: record.userText,
     prompt: finalPrompt,
-    llmTags,
+    llmTags: variant.llmTags,
     novai: cfg.novelai,
     seed,
     llmProvider: 'openai',
-    llmModel: cfg.llm.model,
+    llmModel: variant.llmModel || cfg.llm.model,
     startedAt,
   });
 
-  await addHistoryRecord(record);
+  await addHistoryRecord(recordItem);
+  record.updatedAt = new Date().toISOString();
+  try {
+    await persistRecords();
+  } catch (error) {
+    console.warn(`[records] 更新记录失败：${error.message}`);
+  }
   // Best effort: the image is already saved and listed even if metadata export
   // fails (for example a read-only disk hiccup).
   try {
-    await attachMetadataForItem(record);
+    await attachMetadataForItem(recordItem);
   } catch (error) {
     console.warn(`[metadata] 生成后写入元数据失败：${error.message}`);
   }
-  return record;
+  return recordItem;
+}
+
+async function rerollRecordVariant(recordId, onStage = () => {}, { signal } = {}) {
+  const cfg = clone(activeConfig);
+  const record = findRecordById(recordId);
+  if (!record) {
+    throw new AppError('没有找到这条记录，可能已被清理。', 404, 'RECORD_NOT_FOUND');
+  }
+  if (!record.userText) {
+    throw new AppError('这条旧记录没有保存原始输入，无法重 roll Tags。', 400, 'RECORD_TEXT_MISSING');
+  }
+  if (!cfg.llm.apiKey) {
+    throw new AppError('还没有配置 LLM API Key，请先在左侧填写并保存。', 400, 'LLM_API_KEY_MISSING');
+  }
+
+  emitStage(onStage, {
+    stage: 'llm',
+    message: '正在重新生成 Tag 版本…',
+    progress: 30,
+  });
+
+  const generated = await generateTagsWithOpenAi(cfg.llm, record.userText, signal);
+  const variant = await appendRecordVariant(record, {
+    title: generated.title,
+    llmTags: generated.tags,
+    llmModel: cfg.llm.model,
+  });
+
+  return {
+    record: publicRecord(record),
+    variant: clone(variant),
+  };
+}
+
+async function renderRecordVariant(
+  recordId,
+  variantId,
+  onStage = () => {},
+  { albumId = null, signal } = {},
+) {
+  const startedAt = Date.now();
+  const cfg = clone(activeConfig);
+  if (!cfg.novelai.apiKey) {
+    throw new AppError('还没有配置 NovelAI API Key，请先在左侧填写并保存。', 400, 'NAI_API_KEY_MISSING');
+  }
+
+  const record = findRecordById(recordId);
+  if (!record) {
+    throw new AppError('没有找到这条记录，可能已被清理。', 404, 'RECORD_NOT_FOUND');
+  }
+  const variant = record.variants.find((entry) => entry.id === variantId);
+  if (!variant) {
+    throw new AppError('没有找到这个 Tag 版本。', 404, 'VARIANT_NOT_FOUND');
+  }
+
+  const targetAlbumId = resolveTargetAlbumId(albumId);
+  const finalPrompt = buildFinalPrompt(cfg.novelai, variant.llmTags);
+  if (!finalPrompt) {
+    throw new AppError('最终提示词为空，请检查基础提示词与该 Tag 版本。', 400, 'EMPTY_PROMPT');
+  }
+
+  const { filename, relativePath, seed } = await renderWithNovelAi(
+    cfg.novelai,
+    finalPrompt,
+    onStage,
+    { albumId: targetAlbumId, signal },
+  );
+
+  const item = makeHistoryRecord({
+    filename,
+    relativePath,
+    albumId: targetAlbumId,
+    recordId: record.id,
+    variantId: variant.id,
+    userText: record.userText,
+    prompt: finalPrompt,
+    llmTags: variant.llmTags,
+    novai: cfg.novelai,
+    seed,
+    llmProvider: 'openai',
+    llmModel: variant.llmModel || cfg.llm.model,
+    startedAt,
+  });
+
+  await addHistoryRecord(item);
+  record.updatedAt = new Date().toISOString();
+  try {
+    await persistRecords();
+  } catch (error) {
+    console.warn(`[records] 更新记录失败：${error.message}`);
+  }
+  try {
+    await attachMetadataForItem(item);
+  } catch (error) {
+    console.warn(`[metadata] 生成后写入元数据失败：${error.message}`);
+  }
+  return item;
 }
 
 /**
@@ -2486,6 +3012,14 @@ async function rerenderFromHistory(historyId, options = {}, onStage = () => {}, 
     throw new AppError('这条历史记录没有保存最终 Tag，无法重绘。', 400, 'HISTORY_PROMPT_MISSING');
   }
 
+  const ensured = ensureRecordForHistoryItem(source);
+  const recordEntity = ensured.record;
+  let variant = ensured.variant;
+  if (ensured.changed) {
+    await persistRecords();
+    await persistHistory();
+  }
+
   const sourceRelative =
     normalizeRelativePath(source.relativePath, source.filename) ||
     relativePathForAlbum(source.albumId, source.filename);
@@ -2502,6 +3036,15 @@ async function rerenderFromHistory(historyId, options = {}, onStage = () => {}, 
     if (!prompt) {
       throw new AppError('重画提示词不能为空。', 400, 'EMPTY_PROMPT');
     }
+  }
+
+  if (prompt !== source.prompt) {
+    variant = await appendRecordVariant(recordEntity, {
+      title: `手动编辑 · ${variant.title || 'Tag 版本'}`,
+      llmTags: prompt,
+      source: 'manual',
+      llmModel: source.llmModel,
+    });
   }
 
   const seedMode = body.seedMode === 'same' ? 'same' : 'new';
@@ -2558,8 +3101,11 @@ async function rerenderFromHistory(historyId, options = {}, onStage = () => {}, 
     relativePath,
     albumId: targetAlbumId,
     parentId: source.id,
+    recordId: recordEntity.id,
+    variantId: variant.id,
+    userText: recordEntity.userText,
     prompt,
-    llmTags: prompt === source.prompt ? source.llmTags : '',
+    llmTags: variant.llmTags,
     novai,
     seed,
     llmProvider: source.llmProvider,
@@ -2568,6 +3114,12 @@ async function rerenderFromHistory(historyId, options = {}, onStage = () => {}, 
   });
 
   await addHistoryRecord(record);
+  recordEntity.updatedAt = new Date().toISOString();
+  try {
+    await persistRecords();
+  } catch (error) {
+    console.warn(`[records] 更新记录失败：${error.message}`);
+  }
   // Best effort: the image is already saved and listed even if metadata export
   // fails (for example a read-only disk hiccup).
   try {
@@ -2611,6 +3163,8 @@ function publicJob(job) {
     albumId: job.albumId,
     text: job.text.length > 120 ? `${job.text.slice(0, 120)}…` : job.text,
     historyId: job.historyId,
+    recordId: job.recordId,
+    variantId: job.variantId,
     createdAt: job.createdAt,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
@@ -2650,19 +3204,31 @@ function trimJobHistory() {
 }
 
 function createJob(spec) {
-  const isRerender = spec.kind === 'rerender';
+  const kind = ['rerender', 'reroll', 'render'].includes(spec.kind)
+    ? spec.kind
+    : 'generate';
+  const label =
+    kind === 'rerender'
+      ? '重画作品'
+      : kind === 'reroll'
+        ? '重 Roll Tags'
+        : kind === 'render'
+          ? '记录生图'
+          : '文生图';
   const job = {
     id: crypto.randomUUID(),
-    kind: isRerender ? 'rerender' : 'generate',
-    label: isRerender ? '重画作品' : '文生图',
+    kind,
+    label,
     status: 'queued',
     stage: 'queued',
     message: '等待开始…',
     progress: 0,
     albumId: spec.albumId ?? null,
-    text: isRerender ? '' : asString(spec.text, '').slice(0, MAX_INPUT_CHARS),
+    text: asString(spec.text, '').slice(0, MAX_INPUT_CHARS),
     historyId: asString(spec.historyId, ''),
-    options: isRerender ? (isPlainObject(spec.options) ? clone(spec.options) : {}) : null,
+    recordId: asString(spec.recordId, ''),
+    variantId: asString(spec.variantId, ''),
+    options: kind === 'rerender' && isPlainObject(spec.options) ? clone(spec.options) : null,
     createdAt: Date.now(),
     startedAt: 0,
     finishedAt: 0,
@@ -2758,6 +3324,14 @@ async function runJob(job) {
       result = await rerenderFromHistory(job.historyId, job.options || {}, (stage) => {
         emitJobStage(job, stage);
       }, { signal });
+    } else if (job.kind === 'reroll') {
+      result = await rerollRecordVariant(job.recordId, (stage) => {
+        emitJobStage(job, stage);
+      }, { signal });
+    } else if (job.kind === 'render') {
+      result = await renderRecordVariant(job.recordId, job.variantId, (stage) => {
+        emitJobStage(job, stage);
+      }, { albumId: job.albumId, signal });
     } else {
       result = await runGeneration(job.text, (stage) => {
         emitJobStage(job, stage);
@@ -2958,6 +3532,41 @@ app.get(
     );
     res.setHeader('Cache-Control', 'no-store');
     res.json({ items });
+  }),
+);
+
+app.get(
+  '/api/records',
+  asyncRoute(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ records: publicRecordList() });
+  }),
+);
+
+app.get(
+  '/api/records/:id',
+  asyncRoute(async (req, res) => {
+    const record = findRecordById(req.params.id);
+    if (!record) {
+      throw new AppError('没有找到这条记录，可能已被清理。', 404, 'RECORD_NOT_FOUND');
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ record: publicRecord(record) });
+  }),
+);
+
+app.patch(
+  '/api/records/:id/variants/:variantId',
+  asyncRoute(async (req, res) => {
+    const { record, variant } = await updateRecordVariant(
+      req.params.id,
+      req.params.variantId,
+      req.body,
+    );
+    res.json({
+      record: publicRecord(record),
+      variant: clone(variant),
+    });
   }),
 );
 
@@ -3169,10 +3778,16 @@ app.post(
   '/api/jobs',
   asyncRoute(async (req, res) => {
     const body = isPlainObject(req.body) ? req.body : {};
-    const spec =
-      body.kind === 'rerender'
-        ? { kind: 'rerender', historyId: asString(body.historyId, ''), options: body }
-        : generateJobSpec(body);
+    let spec;
+    if (body.kind === 'rerender') {
+      spec = { kind: 'rerender', historyId: asString(body.historyId, ''), options: body };
+    } else if (body.kind === 'reroll') {
+      spec = rerollJobSpec(body);
+    } else if (body.kind === 'render') {
+      spec = renderRecordJobSpec(body);
+    } else {
+      spec = generateJobSpec(body);
+    }
     const job = enqueueJob(createJob(spec));
     res.status(202).json({ job: publicJob(job), queueLength: jobQueue.length });
   }),
@@ -3238,6 +3853,42 @@ function generateJobSpec(body) {
     );
   }
   return { kind: 'generate', text, albumId: resolveJobAlbumId(source.albumId) };
+}
+
+function rerollJobSpec(body) {
+  const source = isPlainObject(body) ? body : {};
+  const recordId = asString(source.recordId, '').trim();
+  const record = recordId ? findRecordById(recordId) : null;
+  if (!record) {
+    throw new AppError('没有找到这条记录，可能已被清理。', 404, 'RECORD_NOT_FOUND');
+  }
+  if (!record.userText) {
+    throw new AppError('这条旧记录没有保存原始输入，无法重 roll Tags。', 400, 'RECORD_TEXT_MISSING');
+  }
+  return { kind: 'reroll', recordId: record.id, text: record.userText };
+}
+
+function renderRecordJobSpec(body) {
+  const source = isPlainObject(body) ? body : {};
+  const recordId = asString(source.recordId, '').trim();
+  const variantId = asString(source.variantId, '').trim();
+  const record = recordId ? findRecordById(recordId) : null;
+  if (!record) {
+    throw new AppError('没有找到这条记录，可能已被清理。', 404, 'RECORD_NOT_FOUND');
+  }
+  const variant = variantId
+    ? record.variants.find((entry) => entry.id === variantId)
+    : null;
+  if (!variant) {
+    throw new AppError('没有找到这个 Tag 版本。', 404, 'VARIANT_NOT_FOUND');
+  }
+  return {
+    kind: 'render',
+    recordId: record.id,
+    variantId: variant.id,
+    text: record.userText,
+    albumId: resolveJobAlbumId(source.albumId),
+  };
 }
 
 /**

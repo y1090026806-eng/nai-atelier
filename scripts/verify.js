@@ -83,7 +83,8 @@ function readBody(req) {
   });
 }
 
-const MOCK_LLM_TAGS = 'Here are the tags:\n```\n1girl, solo, rain, city_lights\n```';
+const MOCK_LLM_TAGS =
+  'Here are the tags:\n```\n1girl, solo, rain, city_lights\n```\nTITLE: 雨夜电车月台';
 
 function buildZip(entries) {
   const zip = new AdmZip();
@@ -315,6 +316,13 @@ const getAlbums = () => request('GET', '/api/albums');
 const getTrash = () => request('GET', '/api/trash');
 const getPrompts = () => request('GET', '/api/prompts');
 const getJobs = () => request('GET', '/api/jobs');
+const getRecords = () => request('GET', '/api/records');
+const updateVariant = (recordId, variantId, body) =>
+  request(
+    'PATCH',
+    `/api/records/${encodeURIComponent(recordId)}/variants/${encodeURIComponent(variantId)}`,
+    { body },
+  );
 
 const setAlbumCover = (albumId, historyId) =>
   request('POST', `/api/albums/${encodeURIComponent(albumId)}/cover`, {
@@ -379,7 +387,7 @@ async function waitForJobCondition(id, predicate, timeoutMs = 10_000) {
 }
 
 /* ----------------------------------------------------------------------- */
-/* 1.7.0 metadata helpers: sidecar JSON + PNG tEXt/iTXt chunks             */
+/* 1.8.0 metadata helpers: sidecar JSON + PNG tEXt/iTXt chunks             */
 /* ----------------------------------------------------------------------- */
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -601,8 +609,8 @@ async function run() {
   const health = await request('GET', '/api/health');
   check('健康检查', health.status === 200 && health.body.ok === true);
   check(
-    '健康检查返回 1.7.0 版本',
-    health.body?.version === '1.7.0',
+    '健康检查返回 1.8.0 版本',
+    health.body?.version === '1.8.0',
     JSON.stringify(health.body?.version),
   );
 
@@ -941,7 +949,8 @@ async function run() {
       llmRequest.body.messages[1].role === 'user' &&
       llmRequest.body.messages[1].content === 'USER-B' &&
       llmRequest.body.messages[2].role === 'user' &&
-      llmRequest.body.messages[2].content === '雨夜的电车月台' &&
+      llmRequest.body.messages[2].content.startsWith('雨夜的电车月台') &&
+      llmRequest.body.messages[2].content.includes('TITLE: <标题>') &&
       llmRequest.body.messages[3].role === 'assistant' &&
       llmRequest.body.messages[3].content === 'ASSIST-C',
     JSON.stringify(llmRequest.body.messages),
@@ -1027,7 +1036,8 @@ async function run() {
     '空提示词结构只发送用户输入',
     soloMessages.length === 1 &&
       soloMessages[0].role === 'user' &&
-      soloMessages[0].content === '只有用户输入',
+      soloMessages[0].content.startsWith('只有用户输入') &&
+      soloMessages[0].content.includes('TITLE: <标题>'),
     JSON.stringify(soloMessages),
   );
 
@@ -2134,7 +2144,7 @@ async function run() {
   await setMockMode({ naiMode: 'ok' });
 
   /* =================================================================== */
-  /* 1.7.0 新功能：PNG 元数据 + 配套 JSON 导出                           */
+  /* 1.8.0 新功能：PNG 元数据 + 配套 JSON 导出                           */
   /* =================================================================== */
 
   /* 生成后自动写 sidecar 与 PNG 文本 chunk */
@@ -2151,7 +2161,7 @@ async function run() {
     'sidecar 基本信息与 schema 正确',
     metaSidecar.schema === 'nai-atelier.metadata/1' &&
       metaSidecar.app === 'NAI Atelier' &&
-      metaSidecar.appVersion === '1.7.0' &&
+      metaSidecar.appVersion === '1.8.0' &&
       !Number.isNaN(Date.parse(metaSidecar.exportedAt)) &&
       metaSidecar.id === metaItem.id &&
       metaSidecar.filename === metaItem.filename &&
@@ -2207,7 +2217,7 @@ async function run() {
     'PNG 内嵌 NAI-Atelier JSON 可解析且字段正确',
     metaPng.metadata?.id === metaItem.id &&
       metaPng.metadata?.schema === 'nai-atelier.metadata/1' &&
-      metaPng.metadata?.appVersion === '1.7.0' &&
+      metaPng.metadata?.appVersion === '1.8.0' &&
       metaPng.metadata?.relativePath === metaRelative &&
       metaPng.metadata?.albumId === metaAlbum.id &&
       metaPng.metadata?.prompt === metaItem.prompt &&
@@ -2219,7 +2229,7 @@ async function run() {
   const metaParametersExpected = [
     metaItem.prompt,
     'Negative prompt: lowres, bad hands',
-    `Steps: 24, Sampler: k_euler_ancestral, Schedule type: karras, CFG scale: 5.5, Seed: ${metaItem.seed}, Size: 832x1216, Model: nai-diffusion-4-5-full, NAI Atelier: 1.7.0`,
+    `Steps: 24, Sampler: k_euler_ancestral, Schedule type: karras, CFG scale: 5.5, Seed: ${metaItem.seed}, Size: 832x1216, Model: nai-diffusion-4-5-full, NAI Atelier: 1.8.0`,
   ].join('\n');
   check(
     'PNG parameters chunk 为 A1111 风格文本',
@@ -2621,7 +2631,7 @@ async function run() {
     Boolean(manifest) &&
       manifest.schema === 'nai-atelier.metadata/1' &&
       manifest.app === 'NAI Atelier' &&
-      manifest.appVersion === '1.7.0' &&
+      manifest.appVersion === '1.8.0' &&
       manifest.count === historyForArchive.length &&
       !Number.isNaN(Date.parse(manifest.exportedAt)) &&
       archiveNames.length === historyForArchive.length + 1 &&
@@ -2637,7 +2647,7 @@ async function run() {
     const payload = JSON.parse(entry.getData().toString('utf8'));
     if (
       payload.schema !== 'nai-atelier.metadata/1' ||
-      payload.appVersion !== '1.7.0' ||
+      payload.appVersion !== '1.8.0' ||
       typeof payload.id !== 'string'
     ) {
       archiveFieldsOk = false;
@@ -2898,7 +2908,7 @@ async function run() {
   );
   await trashFileAfterRestart.arrayBuffer();
 
-  /* 重启后：1.7.0 元数据持久化 */
+  /* 重启后：1.8.0 元数据持久化 */
   const restoredMetaRowAfterRestart = historyAfter.body.items.find(
     (item) => item.id === restoredMetaItem.id,
   );
@@ -2954,6 +2964,118 @@ async function run() {
       restoreAfterRestart.body?.item?.filename === restartTrashSource.filename &&
       (await historyIds()).includes(restoreAfterRestart.body.item.id),
     JSON.stringify(restoreAfterRestart.body?.item),
+  );
+
+  /* Records: one original input -> Tag variants -> multiple images. */
+  const recordText = '雨夜少女 · 记录测试';
+  const historyBeforeRecord = (await historyIds()).length;
+  const recordFirst = await generate(recordText);
+  const recordSource = recordFirst.body?.result;
+  check(
+    '生成记录：原始输入、记录与 Tag 版本被保存',
+    recordFirst.status === 200 &&
+      recordSource?.userText === recordText &&
+      Boolean(recordSource?.recordId) &&
+      Boolean(recordSource?.variantId),
+    JSON.stringify(recordSource),
+  );
+
+  let recordsPayload = await getRecords();
+  let recordRow = recordsPayload.body?.records?.find(
+    (entry) => entry.id === recordSource?.recordId,
+  );
+  check(
+    '记录列表返回 LLM 标题与原始输入',
+    recordsPayload.status === 200 &&
+      recordRow?.userText === recordText &&
+      recordRow?.title === '雨夜电车月台' &&
+      recordRow?.variantCount === 1 &&
+      recordRow?.imageCount === 1,
+    JSON.stringify(recordRow),
+  );
+  check(
+    '历史图片带有 recordId / variantId / userText',
+    recordSource?.recordId === recordRow?.id &&
+      recordSource?.variantId === recordRow?.variants?.[0]?.id,
+    JSON.stringify({ recordSource, recordRow }),
+  );
+
+  const rerollResponse = await enqueueJob({
+    kind: 'reroll',
+    recordId: recordSource.recordId,
+  });
+  const rerollDone = await waitForJob(rerollResponse.body?.job?.id);
+  recordsPayload = await getRecords();
+  recordRow = recordsPayload.body?.records?.find(
+    (entry) => entry.id === recordSource.recordId,
+  );
+  check(
+    '重 roll Tags 只新增 Tag 版本，不生图',
+    rerollDone.status === 'done' &&
+      rerollDone.result?.record?.variantCount === 2 &&
+      recordRow?.variantCount === 2 &&
+      recordRow?.imageCount === 1,
+    JSON.stringify({ rerollDone, recordRow }),
+  );
+
+  const secondVariantId = recordRow?.variants?.[1]?.id;
+  const renderResponse = await enqueueJob({
+    kind: 'render',
+    recordId: recordSource.recordId,
+    variantId: secondVariantId,
+  });
+  const renderDone = await waitForJob(renderResponse.body?.job?.id);
+  recordsPayload = await getRecords();
+  recordRow = recordsPayload.body?.records?.find(
+    (entry) => entry.id === recordSource.recordId,
+  );
+  check(
+    '用 Tag 版本生图：图片挂到对应版本',
+    renderDone.status === 'done' &&
+      renderDone.result?.recordId === recordSource.recordId &&
+      renderDone.result?.variantId === secondVariantId &&
+      recordRow?.imageCount === 2 &&
+      recordRow?.variants?.find((entry) => entry.id === secondVariantId)?.imageCount === 1,
+    JSON.stringify({ renderDone, recordRow }),
+  );
+
+  const patchVariantResponse = await updateVariant(
+    recordSource.recordId,
+    secondVariantId,
+    { title: '第二个标题', llmTags: '1girl, rain, night' },
+  );
+  check(
+    'Tag 版本标题与提示词可编辑',
+    patchVariantResponse.status === 200 &&
+      patchVariantResponse.body?.variant?.title === '第二个标题' &&
+      patchVariantResponse.body?.variant?.llmTags === '1girl, rain, night',
+    JSON.stringify(patchVariantResponse.body),
+  );
+
+  const historyBeforeRepeat = (await historyIds()).length;
+  const recordRepeat = await generate(recordText);
+  const recordsAfterRepeat = await getRecords();
+  const recordAfterRepeat = recordsAfterRepeat.body?.records?.find(
+    (entry) => entry.id === recordSource.recordId,
+  );
+  check(
+    '重复输入追加到同一条记录，不新增 Tag 版本',
+    recordRepeat.status === 200 &&
+      (await historyIds()).length === historyBeforeRepeat + 1 &&
+      recordAfterRepeat?.variantCount === 2 &&
+      recordAfterRepeat?.imageCount === 3 &&
+      recordRepeat.body?.result?.variantId === secondVariantId,
+    JSON.stringify(recordAfterRepeat),
+  );
+  check(
+    '记录生图返回 HTTP 条目并保持原始输入',
+    recordRepeat.body?.result?.userText === recordText,
+    JSON.stringify(recordRepeat.body?.result),
+  );
+  const missingRecord = await request('GET', '/api/records/does-not-exist');
+  check(
+    '不存在的记录返回 404',
+    missingRecord.status === 404 && missingRecord.body?.error?.code === 'RECORD_NOT_FOUND',
   );
 }
 
