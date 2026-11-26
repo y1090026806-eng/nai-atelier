@@ -93,7 +93,7 @@ outputs/.incoming/   # 同步过程中的临时目录，同步结束自动清空
 
 ## 代码仓库
 
-代码托管在**私有** GitHub 仓库：<https://github.com/y1090026806-eng/nai-atelier>（需登录且有权限才能访问）。
+代码托管在**公开** GitHub 仓库：<https://github.com/y1090026806-eng/nai-atelier>（可直接访问，无需登录）。
 
 - `main` 分支对应项目当前代码；标签 `v1.9.0` 对应本版本。两边代码保持同步的方式是各自 `git pull`，手机端改完代码就 `git push`，不再手工传 zip。
 - `.gitignore` 已忽略 `data/config.json`（含 API Key）、`data/*.json`、`outputs/`（作品与回收站）、`node_modules/`、`*.log`，这些内容不会进入仓库。

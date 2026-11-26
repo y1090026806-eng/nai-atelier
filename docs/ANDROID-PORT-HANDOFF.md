@@ -2,7 +2,7 @@
 
 > 交接时间：2026-11-26（Asia/Shanghai）
 > 文档状态：**设计 / 交接文档**。PC 端代码已到 **v1.9.0**（含设备间同步）。手机端已能跑 v1.8.0，升级方式是 `git pull` 到 `main`（不要再手工拷包）。
-> 源项目：`D:\NAI-Atelier`（v1.9.0，私有仓库 <https://github.com/y1090026806-eng/nai-atelier>，标签 `v1.9.0`）
+> 源项目：`D:\NAI-Atelier`（v1.9.0，公开仓库 <https://github.com/y1090026806-eng/nai-atelier>，标签 `v1.9.0`）
 > 目标设备：Android 8.0+（arm64），通过 **DSH Go 本机引擎**或 **Termux** 在手机上运行（见 §3.4 / §5.8）
 > 关联文档：`NAI-Atelier-HANDOFF.md`（功能 / PC 运维 / 接口）、`README.md`（API 细节）
 > 仓库内同步副本：`D:\NAI-Atelier\docs\ANDROID-PORT-HANDOFF.md`（以仓库副本为准）
@@ -425,25 +425,18 @@ command -v curl wget tar ss pgrep 2>&1
 
 ### 5.3 M1：把代码放到手机
 
-#### 路线 A（推荐）：私有 GitHub 仓库
+#### 路线 A（推荐）：GitHub 仓库（公开）
 
-DSH Go 的 Ubuntu 里通常带 `gh`（见 [本机引擎说明](https://github.com/ccch1mneyyy/dsh-go/blob/main/docs/guide/zh/03-engine-hosts.md)）：
+公开仓库无需登录，直接 HTTPS 克隆即可：
 
 ```sh
-cd ~
-gh auth status || gh auth login          # 设备码登录，浏览器完成
 git clone https://github.com/y1090026806-eng/nai-atelier.git ~/nai-atelier
 cd ~/nai-atelier
 ```
 
-如果手机上没有 `gh`，用 PAT（**不要把 token 写进仓库或文档**）：
+如果手机上有 `gh`，也可以 `gh repo clone y1090026806-eng/nai-atelier ~/nai-atelier`。
 
-```sh
-git clone https://<用户名>:<PAT>@github.com/y1090026806-eng/nai-atelier.git ~/nai-atelier
-git -C ~/nai-atelier remote set-url origin https://github.com/y1090026806-eng/nai-atelier.git
-```
-
-#### 路线 B（没有 GitHub 登录时）：PC 临时 HTTP
+#### 路线 B（无法访问 GitHub 时）：PC 临时 HTTP
 
 PC（PowerShell）：
 
@@ -1136,7 +1129,7 @@ if (state.sortMode) {
 - Termux Wiki：<https://wiki.termux.com/wiki/Main_Page>
 - Termux（F-Droid）：<https://f-droid.org/packages/com.termux/>
 - Termux:Boot：<https://f-droid.org/packages/com.termux.boot/>
-- 项目仓库（私有）：<https://github.com/y1090026806-eng/nai-atelier>
+- 项目仓库（公开）：<https://github.com/y1090026806-eng/nai-atelier>
 
 > DSH Go 是社区第三方客户端，与 DeepSeek 公司无隶属关系；其安装包、运行环境和数据目录以 App 实际版本为准。本文中标注「待实测」的结论，必须由 §5.2 的真实输出确认后再写进代码或文档。
 

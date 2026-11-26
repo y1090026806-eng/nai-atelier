@@ -63,9 +63,9 @@ npm ci
 npm start
 ```
 
-### 通过 GitHub 获取（如果你有 GitHub 账号）
+### 通过 GitHub 获取（不需要账号）
 
-如果对方给了你私有仓库的协作者权限，可以不用压缩包：
+仓库是公开的，任何人都不用登录、不用权限即可克隆：
 
 ```bash
 git clone https://github.com/y1090026806-eng/nai-atelier.git
@@ -74,7 +74,7 @@ npm ci
 npm start
 ```
 
-以后更新只需要 `git pull`。协作者是只读权限，不会误改仓库。
+以后更新只需要 `git pull`。想贡献代码可以 Fork 后提 PR；直接 clone 的副本不会被误推到上游。
 
 ### 依赖安装失败
 

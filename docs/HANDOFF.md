@@ -1,17 +1,17 @@
 # NAI Atelier — 对话交接说明
 
-> **这份文档是唯一主副本**（仓库 `docs/HANDOFF.md`，随代码一起 `git pull`）。工作区里的 `D:\DSH工作区\NAI-LLM\NAI-Atelier-HANDOFF.md` 只是指向这里的短说明，不要再往那边写内容。
+> **这份文档是唯一主副本**（仓库 `docs/HANDOFF.md`，随代码一起 `git pull`）。工作区里的 `NAI-Atelier-HANDOFF.md` 只是指向这里的短说明，不要再往那边写内容。
 > 两端（电脑 / 手机）用同一份代码 + 应用内「设备间同步」，不需要手工搬运；操作步骤见 [DEVICE-SYNC.md](DEVICE-SYNC.md)。
 > 交接时间：2026-11-26 01:45（Asia/Shanghai）
 > 最近维护：2026-11-26 03:45 — 版本 1.5.0：新增画册（真实文件夹 + 归档/筛选/重命名/删除）；新增单张作品删除；灯箱支持编辑最终提示词 / 负面词 / 模型后重画，并自动打开新图、用 ← → 快速翻页对比；修复「预设保存不生效」的根因——浏览器缓存旧 `app.js`，现在 `public/` 静态资源强制 no-store 且页面带 `?v=` 版本号。`npm run verify` 扩到 82 项，隔离 UI 审计 29 项、线上只读冒烟 16 项，全程假 Key，未消耗额度。
 > 最近维护：2026-11-26 — 版本 1.6.0：新增画册封面、拖拽排序、批量操作 / 清空画廊 / 回收站、提示词收藏库、灯箱 Tag 权重编辑、单并发生成队列（取消 / 超时可视化），NovelAI 请求超时可配置；`npm run verify` 扩到 **183 项**（假上游 + 临时目录，不消耗额度），隔离 UI 交互审计 **113 项**、线上只读冒烟 **22 项**，服务已重启为 1.6.0。
-> 最近维护：2026-11-26 — 版本 1.7.0：新增 **PNG 元数据 + 配套 JSON 导出**——生成 / 重画时自动把 A1111 兼容的 `parameters` 与完整元数据 JSON 写入 PNG 文本块（`tEXt` / `iTXt`），并在图片同目录生成 `.json` sidecar；画廊「元数据」一键补写全部作品并下载 ZIP、灯箱下载单张 JSON；新增 `/api/history/:id/metadata`、`/api/metadata/sync`、`/api/metadata/archive`；sidecar 随移动 / 删除 / 恢复同步。`npm run verify` 扩到 **235 项全部通过**，隔离 UI 元数据导出检查 **16 项**、线上只读冒烟 **19 项**；服务已重启为 1.7.0。代码已纳入 Git 并推送到**私有** GitHub 仓库 `y1090026806-eng/nai-atelier`（标签 `v1.7.0`）。
-> 最近维护：2026-11-26 — 版本 1.8.0：新增**创作记录**——以用户原始输入为记录，记录下保存多个可编辑的 LLM Tag 版本（含 LLM 标题）和每个版本的多张图片；支持 Tag 重 roll、同层并排对比、从任意版本生图、记录标题 / Tags 编辑、原始输入回填；另新增 NovelAI 预设 JSON 导入 / 导出（不含 Key）、提示词铅笔大编辑器、历史原始输入展示。旧 `history.json` 会自动迁移为独立记录，新增 `data/records.json` 与 `/api/records`；`npm run verify` 扩到 **244 项全部通过**，隔离 UI 交互审计 **17/17**，真实数据只读检查通过。代码已提交（`4c4556a`）并推送到**私有** GitHub 仓库 `y1090026806-eng/nai-atelier`（标签 `v1.8.0`）。
+> 最近维护：2026-11-26 — 版本 1.7.0：新增 **PNG 元数据 + 配套 JSON 导出**——生成 / 重画时自动把 A1111 兼容的 `parameters` 与完整元数据 JSON 写入 PNG 文本块（`tEXt` / `iTXt`），并在图片同目录生成 `.json` sidecar；画廊「元数据」一键补写全部作品并下载 ZIP、灯箱下载单张 JSON；新增 `/api/history/:id/metadata`、`/api/metadata/sync`、`/api/metadata/archive`；sidecar 随移动 / 删除 / 恢复同步。`npm run verify` 扩到 **235 项全部通过**，隔离 UI 元数据导出检查 **16 项**、线上只读冒烟 **19 项**；服务已重启为 1.7.0。代码已纳入 Git 并推送到 GitHub 仓库（现为公开）`y1090026806-eng/nai-atelier`（标签 `v1.7.0`）。
+> 最近维护：2026-11-26 — 版本 1.8.0：新增**创作记录**——以用户原始输入为记录，记录下保存多个可编辑的 LLM Tag 版本（含 LLM 标题）和每个版本的多张图片；支持 Tag 重 roll、同层并排对比、从任意版本生图、记录标题 / Tags 编辑、原始输入回填；另新增 NovelAI 预设 JSON 导入 / 导出（不含 Key）、提示词铅笔大编辑器、历史原始输入展示。旧 `history.json` 会自动迁移为独立记录，新增 `data/records.json` 与 `/api/records`；`npm run verify` 扩到 **244 项全部通过**，隔离 UI 交互审计 **17/17**，真实数据只读检查通过。代码已提交（`4c4556a`）并推送到 GitHub 仓库（现为公开）`y1090026806-eng/nai-atelier`（标签 `v1.8.0`）。
 > 最近维护：2026-11-26 — UI 可读性优化（未改后端 / 接口 / 版本号）：灯箱图片支持点击全屏查看原图（再点、`Esc` 或点击空白退出；`Esc` 先退全屏再关灯箱），详情栏改为内部滚动避免按钮被挤出；中文描述框、正 / 负提示词、提示词块与灯箱 Tag 编辑器放大字号并允许纵向拖拽。`npm run verify` 仍为 **235/235**，无头 Chrome 隔离 UI **20/20**，1366 / 1440 / 1920 与 390 宽度均无横向溢出。
 > 最近维护：2026-11-26 — 布局再平衡（前端，未改后端 / 接口 / 版本号）：输入区改为紧凑命令条（默认 2 行、自动增高、可展开编辑），队列改为浮层抽屉不再挤占画廊；画廊新增详细 / 紧凑双密度（矮屏自动紧凑、可手动切换并持久化），短屏断点压缩顶栏 / 画廊头 / 画册栏；桌面侧栏可折叠、新增专注画廊（Esc 退出）。`npm run verify` 仍为 **235/235**，无头 Chrome 隔离 UI **30/30**，1272 / 1366 / 1440 / 1920 / 390 均无横向溢出。
-> 最近维护：2026-11-27 — 版本 1.9.0：新增**设备间同步**（电脑 ↔ 手机）。两端各自离线生图，连同一 Wi-Fi 时在画廊头部「同步」面板里点「开始同步」，双向合并作品 / 画册 / 创作记录 / 回收站 / 提示词收藏；删除靠墓碑传播、排序靠时间戳、图片按 SHA-256 校验、同步前自动备份索引到 `data/backups/`。同步是**独立监听端口**（默认 `3801`，绑 `0.0.0.0`，只暴露 `/sync/*` 并要求 Bearer 口令），主应用仍只监听 `127.0.0.1`；`data/config.json` 里的 API Key **不参与同步**。`npm run verify` **244/244**，新增 `npm run test:sync`（10 项合并单测 + 32 项双实例端到端，全部通过）；文档见 [DEVICE-SYNC.md](DEVICE-SYNC.md) 与本文件 §13。代码已提交（`02ae1f5`）并推送到**私有** GitHub 仓库（分支 `main` + 标签 `v1.9.0`）。
+> 最近维护：2026-11-27 — 版本 1.9.0：新增**设备间同步**（电脑 ↔ 手机）。两端各自离线生图，连同一 Wi-Fi 时在画廊头部「同步」面板里点「开始同步」，双向合并作品 / 画册 / 创作记录 / 回收站 / 提示词收藏；删除靠墓碑传播、排序靠时间戳、图片按 SHA-256 校验、同步前自动备份索引到 `data/backups/`。同步是**独立监听端口**（默认 `3801`，绑 `0.0.0.0`，只暴露 `/sync/*` 并要求 Bearer 口令），主应用仍只监听 `127.0.0.1`；`data/config.json` 里的 API Key **不参与同步**。`npm run verify` **244/244**，新增 `npm run test:sync`（10 项合并单测 + 32 项双实例端到端，全部通过）；文档见 [DEVICE-SYNC.md](DEVICE-SYNC.md) 与本文件 §13。代码已提交（`02ae1f5`）并推送到 GitHub 仓库（现为公开，分支 `main` + 标签 `v1.9.0`）。
 > 用途：在新对话中继续开发、维护或排查 NAI Atelier 时，先阅读本文件。
-> 注意：本项目包含用户私密 API Key 与本地图片。不要读取、打印、复制或提交 `data/config.json` 的真实 Key；不要删除 `outputs/` 里的用户作品（现在也包括回收站 `outputs/.trash/` 与 `data/trash.json`）。
+> 注意：本项目在本地 `data/config.json` 中保存用户私密 API Key（该文件已被 `.gitignore` 忽略，不会进入仓库），并包含本地图片。不要读取、打印、复制或提交 `data/config.json` 的真实 Key；不要删除 `outputs/` 里的用户作品（现在也包括回收站 `outputs/.trash/` 与 `data/trash.json`）。
 
 ## 1. 项目是什么
 
@@ -28,14 +28,14 @@
 | 项目 | 值 |
 | --- | --- |
 | 项目根目录 | `D:\NAI-Atelier` |
-| 旧路径 | `C:\Users\10900\Documents\deepseek-harness\default-workspace\nai-atelier`（已迁移，已不存在） |
+| 旧路径 | `C:\Users\<用户名>\Documents\deepseek-harness\default-workspace\nai-atelier`（已迁移，已不存在） |
 | 访问地址 | <http://127.0.0.1:3000> |
-| 桌面快捷方式 | `C:\Users\10900\Desktop\NAI Atelier.lnk` |
+| 桌面快捷方式 | `%USERPROFILE%\Desktop\NAI Atelier.lnk` |
 | 一键启动脚本 | `D:\NAI-Atelier\start-nai-atelier.bat` |
 | 快捷方式图标 | `D:\NAI-Atelier\nai-atelier.ico` |
 | 当前版本 | 1.9.0（设备间同步：局域网双向合并作品 / 画册 / 记录 / 回收站 / 提示词；保留 1.8.0 创作记录、1.7.0 PNG 元数据 / 画册 / 队列 / 回收站等功能） |
 | 当前服务状态 | 以实际 `/api/health` 为准；本次改完需重启服务才会返回 `version:"1.9.0"`。正常时进程以 `node server.js` 在 `D:\NAI-Atelier` 隐藏窗口运行，日志 `server.out.log` / `server.err.log`。桌面快捷方式可重新打开；若已停止，双击快捷方式即可重启 |
-| 代码仓库 | **私有** GitHub：<https://github.com/y1090026806-eng/nai-atelier>（分支 `main`，最新标签 `v1.9.0`）；本地 `D:\NAI-Atelier` 已是 git 仓库，remote `origin` 指向它。1.8.0 为 `4c4556a` + 标签 `v1.8.0`；1.9.0 为 `02ae1f5` + 标签 `v1.9.0`，已推送到远端。 |
+| 代码仓库 | **公开** GitHub：<https://github.com/y1090026806-eng/nai-atelier>（分支 `main`，最新标签 `v1.9.0`）；本地 `D:\NAI-Atelier` 已是 git 仓库，remote `origin` 指向它。1.8.0 为 `4c4556a` + 标签 `v1.8.0`；1.9.0 为 `02ae1f5` + 标签 `v1.9.0`，已推送到远端。 |
 | 历史作品 | 数量以实际 `outputs/` 为准，全部是用户自己生成的，不要误删；`outputs/albums/` 与 `outputs/.trash/` 也属于用户数据；图片旁 `.json` sidecar 同样是用户数据；1.8.0 起 `data/records.json` 保存创作记录与 Tag 版本 |
 | 用户已有数据 | 用户已有 LLM 预设、画册与作品（以实际 `data/` 与 `outputs/` 为准，不要清空 `presets`、`albums` 或用户作品）；旧作品已在首次 1.8.0 启动时迁移为独立记录（原始输入为空）；旧作品可在画廊点「元数据」补写 PNG 内嵌与 sidecar |
 
@@ -196,7 +196,7 @@ npm run test:sync    # 10 项合并单测 + 32 项双实例端到端，约 40 �
 
 ### 代码提交与 GitHub 同步
 
-GitHub CLI 在 `C:\Users\10900\AppData\Local\Programs\gh-cli\bin\gh.exe`（已加入用户 PATH），登录账号 `y1090026806-eng`；`git` 的 github.com 凭据已通过 `gh auth setup-git` 配好。仓库是**私有**的 <https://github.com/y1090026806-eng/nai-atelier>。
+GitHub CLI（`gh`，已加入 PATH）登录账号 `y1090026806-eng`；`git` 的 github.com 凭据已通过 `gh auth setup-git` 配好。仓库是**公开**的 <https://github.com/y1090026806-eng/nai-atelier>。
 
 ```powershell
 cd D:\NAI-Atelier
@@ -645,10 +645,10 @@ git push origin --tags
     - 覆盖：页面版本 `v1.7`、画廊「元数据」按钮、灯箱「下载元数据」链接（`?download=1`、`.json` 文件名、整行布局）、点击「元数据」后旧图 sidecar 被补写且 JSON 内容正确、ZIP 导出可用、桌面 1440×900 与移动端 390×844 无横向溢出、按钮在移动端可见。
     - 真实服务只读冒烟 **19/19 通过**：`version:"1.7.0"`、22 张历史 / 2 本画册、单张元数据接口与下载头、ZIP 内有 22 个作品 JSON + manifest（内存生成不写盘）、首页引用 `?v=1.7.0`、22 张卡片、桌面与移动端无溢出、0 异常。
     - 真实作品未做批量补写（避免未经用户确认改写原图）：旧作品需在画廊点一次「元数据」才会写入 PNG 内嵌与 sidecar；新生成作品自动写入。
-15. **Git 版本管理 + 私有 GitHub（2026-11-26）**
+15. **Git 版本管理 + GitHub（2026-11-26）**
     - `D:\NAI-Atelier` 已 `git init`（分支 `main`），提交信息「NAI Atelier 1.7.0：本地 LLM Tags × NovelAI 工作台」。
     - `.gitignore` 忽略 `data/config.json`、`data/*.json`、`outputs/`（含 `.trash` 与 sidecar）、`node_modules/`、`*.log`；`.gitattributes` 统一 LF（`.bat` 保持 CRLF）。
-    - 通过 GitHub CLI（`y1090026806-eng`）创建**私有**仓库 <https://github.com/y1090026806-eng/nai-atelier> 并推送 `main` 与标签 `v1.7.0`；`gh` 位于 `C:\Users\10900\AppData\Local\Programs\gh-cli\bin\gh.exe` 并已加入用户 PATH。
+    - 通过 GitHub CLI（`y1090026806-eng`）创建仓库 <https://github.com/y1090026806-eng/nai-atelier> 并推送 `main` 与标签 `v1.7.0`（仓库现已公开）；`gh` 已加入 PATH。
 
 ## 10. 新对话建议的第一步
 
@@ -682,7 +682,7 @@ git push origin --tags
 - ~~导出 PNG 元数据或配套 JSON~~（1.7.0 已实现：PNG `parameters` / `NAI-Atelier` 文本块 + `.json` sidecar + ZIP 导出）。
 - ~~画册封面、拖拽排序、跨画册批量移动~~（1.6.0 已实现）。
 - 打包为 Windows 独立启动器（Electron/服务封装）。
-- ~~GitHub 版本管理~~（1.7.0 已实现：本地 Git + 私有仓库 <https://github.com/y1090026806-eng/nai-atelier>，标签 `v1.7.0` / `v1.8.0`；日常流程见 §4「代码提交与 GitHub 同步」）。
+- ~~GitHub 版本管理~~（1.7.0 已实现：本地 Git + 公开仓库 <https://github.com/y1090026806-eng/nai-atelier>，标签 `v1.7.0` / `v1.8.0`；日常流程见 §4「代码提交与 GitHub 同步」）。
 - ~~重新生成 / 复用历史参数~~（1.1.0 已实现：灯箱「应用修改并重画」与「复用参数」）。
 - ~~LLM 统一 OpenAI 兼容 + 拉取模型 + 参数~~（1.2.0 已实现）。
 - ~~自动化测试~~（1.2.0 已实现：`npm run verify`）。
@@ -768,7 +768,7 @@ git push origin --tags
 - `npm run verify`：**244/244**（版本号断言改为从 `package.json` 读，不再硬编码）。
 - `node scripts/sync-selftest.js`：**10/10**（合并规则：时间戳胜负、墓碑优先、排序基序、左右对称、回收站 / 恢复、record 变体）。
 - `node scripts/sync-e2e.js`：**32/32**（双实例：首次全量、二次幂等零搬运、新增作品 + 排序回传、回收站双向、彻底删除连文件一起传播、错口令 401、对方离线 502、重启后设置保留）。
-- 冒烟：临时目录起服务，`/api/health` 返回 1.9.0，`/api/sync/status` 返回默认关闭 + `addresses:["192.168.10.36"]`，首页含 `sync-dialog` / `open-sync`，静态资源 `?v=1.9.0`。
+- 冒烟：临时目录起服务，`/api/health` 返回 1.9.0，`/api/sync/status` 返回默认关闭 + `addresses:["192.168.1.100"]`，首页含 `sync-dialog` / `open-sync`，静态资源 `?v=1.9.0`。
 
 ### 交接方式（顺带解决「搬来搬去」的问题）
 - **代码**：两端都只用 Git。改前 `git pull`，改后 `npm run verify && npm run test:sync` 再 `git push`；不要用 zip 或聊天传文件。仓库里 `data/`、`outputs/` 已被忽略，不会误传 Key 与作品。
