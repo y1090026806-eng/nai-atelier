@@ -25,11 +25,38 @@ const {
   revisionHash,
 } = require('./lib/sync-merge');
 
+const {
+  resolveCapabilities,
+  listModelCapabilities,
+  normalizeUcPreset,
+  normalizeQualityPreset,
+  UC_PRESETS,
+  QUALITY_PRESETS,
+} = require('./lib/nai/capabilities');
+const { compilePrompt } = require('./lib/nai/compile');
+const { buildGenerationPayload } = require('./lib/nai/payload');
+const { requestImage } = require('./lib/nai/transport');
+const { NaiError } = require('./lib/nai/errors');
+const { promptTags, tagDedupeKey, dedupeTags } = require('./lib/prompts/tags');
+const { parseStructuredOutput } = require('./lib/prompts/parse');
+const {
+  MAX_PROMPT_PRESETS,
+  normalizePromptPreset,
+  normalizeUserPresets,
+  getBuiltinPresets,
+  getBuiltinPreset,
+  listPromptPresets,
+  exportPromptPresets,
+  parseImportText,
+  mergeImportedPresets,
+  normalizeBlocks: normalizePresetBlocks,
+} = require('./lib/prompts/presets');
+
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '2.0.0';
 
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
@@ -156,6 +183,9 @@ const DEFAULT_CONFIG = {
     availableModels: [],
     availableModelsBaseUrl: '',
     presets: [],
+    structuredOutput: false,
+    promptPresets: [],
+    activePromptPresetId: '',
   },
   novelai: {
     apiKey: '',
@@ -174,6 +204,12 @@ const DEFAULT_CONFIG = {
     basePositive: '',
     artistPrompt: '',
     negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    ucPresetId: 'heavy',
+    qualityPresetId: 'standard',
+    transparentBackground: false,
+    varietyBoost: false,
+    forceSfw: false,
+    characters: [],
     presets: [],
   },
 };
@@ -230,6 +266,43 @@ function normalizeSeed(value) {
 
 function randomSeed() {
   return crypto.randomBytes(4).readUInt32BE(0);
+}
+
+/**
+ * 角色列表（用于角色提示词 + 坐标）。
+ * 与 LLM 输出的角色不是一回事：这里是「固定主角」的设定，LLM 只负责写
+ * 这一张图里的动作与表情，同名角色会沿用这里的 uc 与站位。
+ */
+function normalizeCharacters(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const characters = [];
+  for (const item of list) {
+    if (!isPlainObject(item)) continue;
+    const name = asString(item.name, '').trim().slice(0, 60);
+    const prompt = asString(item.prompt, '').trim().slice(0, 4_000);
+    if (!name && !prompt) continue;
+    const center = isPlainObject(item.center) ? item.center : {};
+    // 没给坐标就存 null，让 compile.js 的 defaultCenters 按人数自动排站位。
+    // 这里若补成 0.5/0.5，双人图会两个人叠在画面正中。
+    const hasCenter =
+      Number.isFinite(Number(center.x ?? item.centerX)) ||
+      Number.isFinite(Number(center.y ?? item.centerY));
+    characters.push({
+      id: asString(item.id, '').trim().slice(0, 80) || crypto.randomUUID(),
+      name: name || `角色 ${characters.length + 1}`,
+      prompt,
+      uc: asString(item.uc, '').trim().slice(0, 2_000),
+      center: hasCenter
+        ? {
+            x: Math.round(clampNumber(center.x ?? item.centerX, 0.5, 0, 1) * 1000) / 1000,
+            y: Math.round(clampNumber(center.y ?? item.centerY, 0.5, 0, 1) * 1000) / 1000,
+          }
+        : null,
+      enabled: item.enabled !== false,
+    });
+    if (characters.length >= 10) break;
+  }
+  return characters;
 }
 
 function normalizePromptBlocks(rawBlocks, fallbackText) {
@@ -298,6 +371,9 @@ function normalizeLlmCore(source, legacyGemini = false) {
     reasoningEffort: REASONING_EFFORTS.has(source.reasoningEffort) ? source.reasoningEffort : '',
     timeoutSeconds: clampInt(source.timeoutSeconds, defaults.timeoutSeconds, 10, 600),
     promptBlocks: normalizePromptBlocks(source.promptBlocks, source.systemPrompt),
+    structuredOutput: source.structuredOutput === true,
+    promptPresets: normalizeUserPresets(source.promptPresets),
+    activePromptPresetId: asString(source.activePromptPresetId, '').trim().slice(0, 80),
   };
 }
 
@@ -306,10 +382,14 @@ function normalizeLlmPreset(raw) {
   const name = asString(raw.name, '').trim().slice(0, 60);
   if (!name) return null;
 
+  // 整份 LLM 配置预设只覆盖「连供应商一起换」的字段；提示词预设是另一份
+  // 独立资产（pp-*），不能被切换 LLM 时顺手覆盖掉。
+  const { promptPresets, activePromptPresetId, ...core } = normalizeLlmCore(raw);
+
   return {
     id: asString(raw.id, '').trim().slice(0, 80) || crypto.randomUUID(),
     name,
-    ...normalizeLlmCore(raw),
+    ...core,
     availableModels: normalizeModelOptions(raw.availableModels),
     availableModelsBaseUrl: normalizeBaseUrl(raw.availableModelsBaseUrl, ''),
   };
@@ -347,6 +427,13 @@ function normalizeNovelAiCore(source) {
     basePositive: asString(source.basePositive, defaults.basePositive).slice(0, 8_000),
     artistPrompt: asString(source.artistPrompt, defaults.artistPrompt).slice(0, 4_000),
     negativePrompt: asString(source.negativePrompt, defaults.negativePrompt).slice(0, 8_000),
+    // V5 的两组预设：ucPresetId 决定内置负面集合，qualityPresetId 决定内置质量词。
+    ucPresetId: normalizeUcPreset(source.ucPresetId),
+    qualityPresetId: normalizeQualityPreset(source.qualityPresetId),
+    transparentBackground: source.transparentBackground === true,
+    varietyBoost: source.varietyBoost === true,
+    forceSfw: source.forceSfw === true,
+    characters: normalizeCharacters(source.characters),
   };
 }
 
@@ -652,6 +739,14 @@ const TITLE_FORMAT_HINT = [
   '标题不超过 24 个汉字，不要解释。',
 ].join('\n');
 
+const STRUCTURED_FORMAT_HINT = [
+  '只输出一个 JSON 对象，不要解释，也不要代码围栏。',
+  '结构：{"title":"简短中文标题","scene":"英文 Danbooru 标签，逗号分隔",',
+  '"characters":[{"name":"角色名","prompt":"英文标签","uc":"可选的负面标签","center":{"x":0.33,"y":0.5}}],',
+  '"negative":"可选的负面标签"}',
+  'scene 与 characters 至少有一项非空；center 用 0–1 的归一化坐标，拿不准就省略这个字段。',
+].join('\n');
+
 function cleanRecordTitle(value) {
   return asString(value, '')
     .replace(/\r?\n/g, ' ')
@@ -674,13 +769,27 @@ function fallbackRecordTitle(userText, tags = '') {
   return firstTags.slice(0, 40) || '旧作品';
 }
 
-function parseLlmOutput(rawContent, userText) {
+function parseLlmOutput(rawContent, userText, { maxCharacters = 6 } = {}) {
   if (typeof rawContent !== 'string' || !rawContent.trim()) {
     throw new AppError('LLM 返回了空内容，未获得可用标签。', 502, 'LLM_EMPTY_RESPONSE');
   }
 
   let text = rawContent.replace(/\r\n?/g, '\n').trim();
   text = text.replace(/```[a-zA-Z0-9_-]*\s*/g, '').replace(/```/g, '');
+
+  // 结构化模式：scene + characters 契约。解析不出来就回退到「一行 tags」，
+  // 保证换预设、换模型时不会因为模型不听话而整条流程失败。
+  const structured = parseStructuredOutput(text, { maxCharacters });
+  if (structured) {
+    const tags = structured.scene;
+    return {
+      title: cleanRecordTitle(structured.title) || fallbackRecordTitle(userText, tags),
+      tags,
+      characters: structured.characters,
+      negative: structured.negative,
+      structured: true,
+    };
+  }
 
   // Some models follow the title instruction by switching to JSON.
   const jsonStart = text.indexOf('{');
@@ -697,7 +806,7 @@ function parseLlmOutput(rawContent, userText) {
         const tags = normalizeLlmTags(rawTags);
         const title =
           cleanRecordTitle(parsed.title) || fallbackRecordTitle(userText, tags);
-        return { title, tags };
+        return { title, tags, characters: [], negative: '', structured: false };
       }
     } catch {
       // Fall through to the plain-text parser.
@@ -723,6 +832,9 @@ function parseLlmOutput(rawContent, userText) {
   return {
     title: title || fallbackRecordTitle(userText, tags),
     tags,
+    characters: [],
+    negative: '',
+    structured: false,
   };
 }
 
@@ -744,7 +856,7 @@ function buildChatMessages(llm, userText, { titleHint = '' } = {}) {
   return [...before, { role: 'user', content: userContent }, ...after];
 }
 
-async function generateTagsWithOpenAi(llm, userText, signal) {
+async function generateTagsWithOpenAi(llm, userText, signal, { maxCharacters = 6 } = {}) {
   if (!llm.apiKey) {
     throw new AppError('请先在侧边栏填写 LLM API Key。', 400, 'LLM_API_KEY_MISSING');
   }
@@ -757,7 +869,11 @@ async function generateTagsWithOpenAi(llm, userText, signal) {
       url,
       {
         model: llm.model,
-        messages: buildChatMessages(llm, userText, { titleHint: TITLE_FORMAT_HINT }),
+        messages: buildChatMessages(llm, userText, {
+          titleHint: llm.structuredOutput
+            ? `${STRUCTURED_FORMAT_HINT}\n\n${TITLE_FORMAT_HINT}`
+            : TITLE_FORMAT_HINT,
+        }),
         temperature: llm.temperature,
         top_p: llm.topP,
         max_tokens: llm.maxTokens,
@@ -815,40 +931,15 @@ async function generateTagsWithOpenAi(llm, userText, signal) {
     );
   }
 
-  return parseLlmOutput(text, userText);
+  return parseLlmOutput(text, userText, { maxCharacters });
 }
 
 /* ------------------------------------------------------------------ */
 /* Prompt assembly + NovelAI                                           */
 /* ------------------------------------------------------------------ */
 
-function promptTags(value) {
-  return String(value ?? '')
-    .split(/[,\n]+/)
-    .map((tag) => tag.trim())
-    .filter(Boolean);
-}
-
-/**
- * Compare tags ignoring NovelAI weight syntax so `(1girl:1.2)` and `1girl`
- * are recognised as the same tag. The first (highest-priority) spelling wins.
- */
-function tagDedupeKey(tag) {
-  let value = tag.trim();
-  for (let round = 0; round < 4; round += 1) {
-    const weighted = value.match(/^\((.*):\s*[0-9.]+\s*\)$/);
-    if (weighted) {
-      value = weighted[1].trim();
-      continue;
-    }
-    if (/^\(.*\)$/.test(value) || /^\[.*\]$/.test(value)) {
-      value = value.slice(1, -1).trim();
-      continue;
-    }
-    break;
-  }
-  return value.toLowerCase().replace(/\s+/g, ' ');
-}
+// promptTags / tagDedupeKey 已移到 lib/prompts/tags.js：
+// 服务端提示词拼接、结构化多角色合并、前端预览共用同一套去重口径。
 
 function buildFinalPrompt(novai, llmTags) {
   // NovelAI 最终正向提示词的拼接顺序：Artist → LLM Tags → Base positive。
@@ -870,114 +961,78 @@ function buildFinalPrompt(novai, llmTags) {
   return unique.join(', ');
 }
 
-function buildNaiEndpoint(baseUrl) {
+function buildNaiEndpoint(baseUrl, model = '') {
   const base = assertHttpUrl(baseUrl, 'NovelAI Base URL').replace(/\/+$/, '');
-  if (/\/ai\/generate-image$/i.test(base)) return base;
-  return `${base}/ai/generate-image`;
+  const { endpoint } = resolveCapabilities(model);
+  if (base.endsWith(endpoint)) return base;
+  return `${base}${endpoint}`;
 }
 
+/** 兼容旧调用：只给一个正向字符串时，按「无角色」编译后构造请求体。 */
 function buildNaiPayload(novai, prompt, seed) {
-  const isV5 = novai.model.startsWith('nai-diffusion-5');
-  const supportsStructuredPrompt = isV5 || novai.model.startsWith('nai-diffusion-4');
-
-  const parameters = {
-    width: novai.width,
-    height: novai.height,
-    n_samples: 1,
-    seed,
-    sampler: novai.sampler,
-    steps: novai.steps,
-    scale: novai.scale,
-    negative_prompt: novai.negativePrompt,
-    cfg_rescale: novai.cfgRescale,
-    noise_schedule: novai.noiseSchedule,
-    params_version: isV5 ? 4 : 3,
-    legacy: false,
-    legacy_v3_extend: false,
-    qualityToggle: novai.qualityToggle,
-    ucPreset: 0,
-    dynamic_thresholding: false,
-    controlnet_strength: 1,
-    add_original_image: true,
-    prefer_brownian: false,
+  const capabilities = resolveCapabilities(novai.model);
+  const compiled = {
+    positive: prompt,
+    negative: novai.negativePrompt,
+    characters: [],
   };
-
-  if (supportsStructuredPrompt) {
-    parameters.use_coords = false;
-    parameters.legacy_uc = false;
-    parameters.v4_prompt = {
-      caption: { base_caption: prompt, char_captions: [] },
-      use_coords: false,
-      use_order: true,
-      legacy_uc: false,
-    };
-    parameters.v4_negative_prompt = {
-      caption: { base_caption: novai.negativePrompt, char_captions: [] },
-      use_coords: false,
-      use_order: false,
-      legacy_uc: false,
-    };
-  }
-
-  return {
-    input: prompt,
-    model: novai.model,
-    action: 'generate',
-    parameters,
-  };
+  return buildGenerationPayload({ novai, compiled, capabilities, seed }).payload;
 }
 
-async function requestNovelAi(novai, prompt, signal) {
-  if (!novai.apiKey) {
-    throw new AppError('请先在侧边栏填写 NovelAI API Key。', 400, 'NAI_API_KEY_MISSING');
+/**
+ * 把「配置 + LLM 输出」编译成一次请求的内容，并附上模型能力。
+ * 所有生成入口都必须经过这里，保证角色提示词与坐标只有一个来源。
+ */
+function planRender(novai, { tags = '', characters = [], negative = '' } = {}) {
+  const capabilities = resolveCapabilities(novai.model);
+  const compiled = compilePrompt({ novai, capabilities, tags, characters, extraNegative: negative });
+  for (const warning of compiled.warnings) {
+    console.warn(`[prompt] ${warning}`);
   }
+  return { capabilities, compiled };
+}
 
-  const seed = novai.seed >= 0 ? novai.seed : randomSeed();
-  const url = buildNaiEndpoint(novai.baseUrl);
-  const payload = buildNaiPayload(novai, prompt, seed);
-  let response;
+/* 最近若干次 NovelAI 请求的诊断记录：出问题时能看出是协议、参数还是上游。 */
+const DIAGNOSTIC_LIMIT = 30;
+let naiDiagnostics = [];
 
+function diagnosticsPath() {
+  return path.join(DATA_DIR, 'diagnostics.json');
+}
+
+async function loadNaiDiagnostics() {
+  const raw = await readJsonFile(diagnosticsPath(), { items: [] });
+  naiDiagnostics = Array.isArray(raw?.items) ? raw.items.slice(0, DIAGNOSTIC_LIMIT) : [];
+}
+
+async function pushNaiDiagnostic(entry) {
+  naiDiagnostics.unshift(entry);
+  if (naiDiagnostics.length > DIAGNOSTIC_LIMIT) naiDiagnostics.length = DIAGNOSTIC_LIMIT;
   try {
-    response = await axios.post(url, payload, {
-      headers: {
-        Authorization: `Bearer ${novai.apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/zip, image/png, application/json',
-      },
-      responseType: 'arraybuffer',
-      timeout: novai.timeoutSeconds * 1000,
-      ...(signal ? { signal } : {}),
-      maxBodyLength: Infinity,
-      maxContentLength: 128 * 1024 * 1024,
-      validateStatus: () => true,
-    });
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.writeFile(diagnosticsPath(), JSON.stringify({ items: naiDiagnostics }, null, 2));
   } catch (error) {
-    if (isCancelError(error)) throw canceledError();
-    throw cleanAxiosNetworkMessage('NovelAI', error, novai.timeoutSeconds);
+    console.warn(`[diagnostics] 写入诊断记录失败：${error.message}`);
   }
+}
 
-  const raw = Buffer.isBuffer(response.data)
-    ? response.data
-    : Buffer.from(response.data ?? []);
-
-  if (response.status < 200 || response.status >= 300) {
-    const detail = extractApiErrorDetail(raw);
-    let hint = 'NovelAI 请求失败';
-    if (response.status === 401 || response.status === 403) hint = 'NovelAI API Key 无效或无权限';
-    else if (response.status === 402) hint = 'NovelAI Anlas 余额不足或账户订阅不可用';
-    else if (response.status === 429) hint = 'NovelAI 请求过于频繁，请稍后再试';
-    else if (response.status >= 500) hint = 'NovelAI 服务暂时不可用';
-    throw new AppError(
-      `${hint}（HTTP ${response.status}）${detail ? `：${detail}` : ''}`,
-      502,
-      'NAI_UPSTREAM_ERROR',
-    );
-  }
-
+/** 兼容入口：给一个已经拼好的正向字符串，按「无角色」走新协议层。 */
+async function requestNovelAi(novai, prompt, signal) {
+  const capabilities = resolveCapabilities(novai.model);
+  const seed = novai.seed >= 0 ? novai.seed : randomSeed();
+  const compiled = {
+    positive: prompt,
+    negative: novai.negativePrompt,
+    characters: [],
+  };
+  const request = buildGenerationPayload({ novai, compiled, capabilities, seed });
+  const result = await requestImage({ novai, request, capabilities, signal });
   return {
-    raw,
+    image: result.image || null,
+    raw: result.buffer || null,
     seed,
-    contentType: String(response.headers['content-type'] || ''),
+    contentType: result.meta?.contentType || '',
+    meta: result.meta,
   };
 }
 
@@ -1574,6 +1629,9 @@ function normalizeRecordVariant(raw) {
     id,
     title: cleanRecordTitle(raw.title),
     llmTags,
+    characters: normalizeCharacters(raw.characters),
+    negative: asString(raw.negative, '').slice(0, 4_000),
+    structured: Boolean(raw.structured),
     source,
     llmModel: asString(raw.llmModel, '').slice(0, 200),
     createdAt: Number.isNaN(createdAt.getTime()) ? new Date().toISOString() : createdAt.toISOString(),
@@ -1690,12 +1748,24 @@ async function persistRecords() {
   await queueWrite(() => atomicWriteJson(RECORDS_FILE, snapshot));
 }
 
-function makeRecordVariant({ title, llmTags, source = 'llm', llmModel = '', createdAt }) {
+function makeRecordVariant({
+  title,
+  llmTags,
+  characters = [],
+  negative = '',
+  structured = false,
+  source = 'llm',
+  llmModel = '',
+  createdAt,
+}) {
   const now = createdAt || new Date().toISOString();
   return {
     id: crypto.randomUUID(),
     title: cleanRecordTitle(title) || fallbackRecordTitle('', llmTags),
     llmTags: asString(llmTags, '').slice(0, 8_000),
+    characters: normalizeCharacters(characters),
+    negative: asString(negative, '').slice(0, 4_000),
+    structured: Boolean(structured),
     source: ['llm', 'manual', 'legacy'].includes(source) ? source : 'llm',
     llmModel: asString(llmModel, '').slice(0, 200),
     createdAt: now,
@@ -1703,7 +1773,10 @@ function makeRecordVariant({ title, llmTags, source = 'llm', llmModel = '', crea
   };
 }
 
-async function createRecordWithVariant(userText, { title, llmTags, source = 'llm', llmModel = '' }) {
+async function createRecordWithVariant(
+  userText,
+  { title, llmTags, characters = [], negative = '', structured = false, source = 'llm', llmModel = '' },
+) {
   if (records.length >= MAX_RECORDS) {
     // Prefer dropping old records that no longer own any image.
     const removable = records.filter((record) => recordImages(record.id).length === 0);
@@ -1718,7 +1791,7 @@ async function createRecordWithVariant(userText, { title, llmTags, source = 'llm
   }
 
   const now = new Date().toISOString();
-  const variant = makeRecordVariant({ title, llmTags, source, llmModel, createdAt: now });
+  const variant = makeRecordVariant({ title, llmTags, characters, negative, structured, source, llmModel, createdAt: now });
   const record = {
     id: crypto.randomUUID(),
     userText: asString(userText, '').slice(0, MAX_INPUT_CHARS),
@@ -1732,7 +1805,10 @@ async function createRecordWithVariant(userText, { title, llmTags, source = 'llm
   return { record, variant };
 }
 
-async function appendRecordVariant(record, { title, llmTags, source = 'llm', llmModel = '' }) {
+async function appendRecordVariant(
+  record,
+  { title, llmTags, characters = [], negative = '', structured = false, source = 'llm', llmModel = '' },
+) {
   if (record.variants.length >= MAX_VARIANTS_PER_RECORD) {
     throw new AppError(
       `同一条记录最多保存 ${MAX_VARIANTS_PER_RECORD} 个 Tag 版本。`,
@@ -1740,7 +1816,7 @@ async function appendRecordVariant(record, { title, llmTags, source = 'llm', llm
       'VARIANT_LIMIT',
     );
   }
-  const variant = makeRecordVariant({ title, llmTags, source, llmModel });
+  const variant = makeRecordVariant({ title, llmTags, characters, negative, structured, source, llmModel });
   record.variants.push(variant);
   record.updatedAt = new Date().toISOString();
   await persistRecords();
@@ -1889,6 +1965,8 @@ async function initializeStorage() {
 
   const rawRecords = await readJsonFile(RECORDS_FILE, []);
   records = normalizeRecordList(rawRecords);
+
+  await loadNaiDiagnostics();
 
   const restored = [];
   for (const row of rows) {
@@ -3564,22 +3642,91 @@ function makeOutputFilename(extension) {
   return `nai-${date}-${time}-${crypto.randomBytes(3).toString('hex')}.${extension}`;
 }
 
-async function renderWithNovelAi(novai, prompt, onStage = () => {}, { albumId = null, signal } = {}) {
+async function renderWithNovelAi(novai, plan, onStage = () => {}, { albumId = null, signal } = {}) {
+  if (!novai.apiKey) {
+    throw new AppError('请先在侧边栏填写 NovelAI API Key。', 400, 'NAI_API_KEY_MISSING');
+  }
+
+  const capabilities = plan?.capabilities || resolveCapabilities(novai.model);
+  const compiled = plan?.compiled || {
+    positive: String(plan || ''),
+    negative: novai.negativePrompt,
+    characters: [],
+    warnings: [],
+  };
+  if (!compiled.positive.trim()) {
+    throw new AppError('最终提示词为空，请检查基础提示词与 LLM 输出。', 400, 'EMPTY_PROMPT');
+  }
+
+  const seed = novai.seed >= 0 ? novai.seed : randomSeed();
+  const request = buildGenerationPayload({ novai, compiled, capabilities, seed });
+  const isV5 = request.transport === 'msgpack-stream';
+
   emitStage(onStage, {
     stage: 'nai',
-    message: '正在调用 NovelAI 生图…',
+    message: isV5
+      ? '正在调用 NovelAI（V5 流式生成，收到最终帧即可保存）…'
+      : '正在调用 NovelAI 生图…',
     progress: 45,
   });
 
-  const { raw, seed, contentType } = await requestNovelAi(novai, prompt, signal);
+  const startedAt = Date.now();
+  let lastFrameAt = 0;
+  let result;
+  try {
+    result = await requestImage({
+      novai,
+      request,
+      capabilities,
+      signal,
+      onRetry: ({ attempt, delayMs, error }) => {
+        emitStage(onStage, {
+          stage: 'nai',
+          message: `NovelAI 返回 ${error?.status || error?.code || '错误'}，${Math.round(delayMs / 1000)}s 后进行第 ${attempt} 次重试…`,
+          progress: 46,
+        });
+      },
+      onFrame: (event, info) => {
+        if (event?.event_type !== 'intermediate') return;
+        const now = Date.now();
+        if (now - lastFrameAt < 800) return;
+        lastFrameAt = now;
+        emitStage(onStage, {
+          stage: 'nai',
+          message: `NovelAI 正在生成…（已收到 ${info?.frameCount ?? 1} 个中间帧）`,
+          progress: 55,
+        });
+      },
+    });
+  } catch (error) {
+    await pushNaiDiagnostic({
+      at: new Date().toISOString(),
+      ok: false,
+      model: novai.model,
+      transport: request.transport,
+      endpoint: request.endpointPath,
+      code: error?.code || 'UNKNOWN',
+      status: error?.status ?? null,
+      detail: error?.detail || '',
+      message: error?.message || '',
+      elapsedMs: Date.now() - startedAt,
+    });
+    throw error;
+  }
 
-  emitStage(onStage, {
-    stage: 'unzip',
-    message: '正在从 NovelAI ZIP 中解压图片…',
-    progress: 82,
-  });
+  let image;
+  if (result.image) {
+    // V5 流式响应里 final 帧直接就是 PNG。
+    image = { buffer: result.image, extension: 'png' };
+  } else {
+    emitStage(onStage, {
+      stage: 'unzip',
+      message: '正在从 NovelAI 响应中解出图片…',
+      progress: 82,
+    });
+    image = extractImageFromNaiResponse(result.buffer, result.meta?.contentType || '');
+  }
 
-  const image = extractImageFromNaiResponse(raw, contentType);
   const filename = makeOutputFilename(image.extension);
   const relativePath = relativePathForAlbum(albumId, filename);
   const absolutePath = resolveOutputPath(relativePath);
@@ -3592,7 +3739,30 @@ async function renderWithNovelAi(novai, prompt, onStage = () => {}, { albumId = 
 
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
   await fs.writeFile(absolutePath, image.buffer);
-  return { filename, relativePath, albumId, seed };
+
+  await pushNaiDiagnostic({
+    at: new Date().toISOString(),
+    ok: true,
+    model: novai.model,
+    transport: request.transport,
+    endpoint: request.endpointPath,
+    bytes: image.buffer.length,
+    frames: result.meta?.frames ?? 1,
+    attempts: result.attempts ?? 1,
+    characters: compiled.characters?.length ?? 0,
+    warnings: compiled.warnings?.length ?? 0,
+    seed,
+    elapsedMs: Date.now() - startedAt,
+  });
+
+  return {
+    filename,
+    relativePath,
+    albumId,
+    seed,
+    meta: result.meta,
+    compiled,
+  };
 }
 
 function makeHistoryRecord({
@@ -3605,6 +3775,10 @@ function makeHistoryRecord({
   userText = '',
   prompt,
   llmTags,
+  characters = [],
+  negativePrompt = '',
+  promptWarnings = [],
+  structured = false,
   novai,
   seed,
   llmProvider,
@@ -3625,7 +3799,10 @@ function makeHistoryRecord({
     userText,
     prompt,
     llmTags,
-    negativePrompt: novai.negativePrompt,
+    characters: Array.isArray(characters) ? characters : [],
+    structured: Boolean(structured),
+    promptWarnings: Array.isArray(promptWarnings) ? promptWarnings.slice(0, 6) : [],
+    negativePrompt: negativePrompt || novai.negativePrompt,
     model: novai.model,
     sampler: novai.sampler,
     noiseSchedule: novai.noiseSchedule,
@@ -3636,6 +3813,8 @@ function makeHistoryRecord({
     height: novai.height,
     seed,
     qualityToggle: novai.qualityToggle,
+    ucPresetId: novai.ucPresetId,
+    qualityPresetId: novai.qualityPresetId,
     llmProvider,
     llmModel,
     createdAt,
@@ -3677,17 +3856,25 @@ async function runGeneration(userText, onStage = () => {}, { albumId = null, sig
       progress: 15,
     });
 
-    const generated = await generateTagsWithOpenAi(cfg.llm, text, signal);
+    const generated = await generateTagsWithOpenAi(cfg.llm, text, signal, {
+      maxCharacters: resolveCapabilities(cfg.novelai.model).maxCharacters,
+    });
     if (record) {
       variant = await appendRecordVariant(record, {
         title: generated.title,
         llmTags: generated.tags,
+        characters: generated.characters,
+        negative: generated.negative,
+        structured: generated.structured,
         llmModel: cfg.llm.model,
       });
     } else {
       ({ record, variant } = await createRecordWithVariant(text, {
         title: generated.title,
         llmTags: generated.tags,
+        characters: generated.characters,
+        negative: generated.negative,
+        structured: generated.structured,
         llmModel: cfg.llm.model,
       }));
     }
@@ -3699,29 +3886,35 @@ async function runGeneration(userText, onStage = () => {}, { albumId = null, sig
     });
   }
 
-  const finalPrompt = buildFinalPrompt(cfg.novelai, variant.llmTags);
-  if (!finalPrompt) {
+  const plan = planRender(cfg.novelai, {
+    tags: variant.llmTags,
+    characters: variant.characters || [],
+    negative: variant.negative || '',
+  });
+  if (!plan.compiled.positive.trim()) {
     throw new AppError('最终提示词为空，请检查基础提示词与 LLM 输出。', 400, 'EMPTY_PROMPT');
   }
 
-  const { filename, relativePath, seed } = await renderWithNovelAi(
-    cfg.novelai,
-    finalPrompt,
-    onStage,
-    { albumId: targetAlbumId, signal },
-  );
+  const render = await renderWithNovelAi(cfg.novelai, plan, onStage, {
+    albumId: targetAlbumId,
+    signal,
+  });
 
   const recordItem = makeHistoryRecord({
-    filename,
-    relativePath,
+    filename: render.filename,
+    relativePath: render.relativePath,
     albumId: targetAlbumId,
     recordId: record.id,
     variantId: variant.id,
     userText: record.userText,
-    prompt: finalPrompt,
+    prompt: render.compiled.positive,
     llmTags: variant.llmTags,
+    characters: render.compiled.characters,
+    negativePrompt: render.compiled.negative,
+    promptWarnings: render.compiled.warnings,
+    structured: variant.structured,
     novai: cfg.novelai,
-    seed,
+    seed: render.seed,
     llmProvider: 'openai',
     llmModel: variant.llmModel || cfg.llm.model,
     startedAt,
@@ -3798,29 +3991,35 @@ async function renderRecordVariant(
   }
 
   const targetAlbumId = resolveTargetAlbumId(albumId);
-  const finalPrompt = buildFinalPrompt(cfg.novelai, variant.llmTags);
-  if (!finalPrompt) {
+  const plan = planRender(cfg.novelai, {
+    tags: variant.llmTags,
+    characters: variant.characters || [],
+    negative: variant.negative || '',
+  });
+  if (!plan.compiled.positive.trim()) {
     throw new AppError('最终提示词为空，请检查基础提示词与该 Tag 版本。', 400, 'EMPTY_PROMPT');
   }
 
-  const { filename, relativePath, seed } = await renderWithNovelAi(
-    cfg.novelai,
-    finalPrompt,
-    onStage,
-    { albumId: targetAlbumId, signal },
-  );
+  const render = await renderWithNovelAi(cfg.novelai, plan, onStage, {
+    albumId: targetAlbumId,
+    signal,
+  });
 
   const item = makeHistoryRecord({
-    filename,
-    relativePath,
+    filename: render.filename,
+    relativePath: render.relativePath,
     albumId: targetAlbumId,
     recordId: record.id,
     variantId: variant.id,
     userText: record.userText,
-    prompt: finalPrompt,
+    prompt: render.compiled.positive,
     llmTags: variant.llmTags,
+    characters: render.compiled.characters,
+    negativePrompt: render.compiled.negative,
+    promptWarnings: render.compiled.warnings,
+    structured: variant.structured,
     novai: cfg.novelai,
-    seed,
+    seed: render.seed,
     llmProvider: 'openai',
     llmModel: variant.llmModel || cfg.llm.model,
     startedAt,
@@ -3940,16 +4139,25 @@ async function rerenderFromHistory(historyId, options = {}, onStage = () => {}, 
     },
   }).novelai;
 
-  const { filename, relativePath, seed } = await renderWithNovelAi(
-    novai,
-    prompt,
-    onStage,
-    { albumId: targetAlbumId, signal },
-  );
+  // 重画用的是已经编译好的最终提示词，不再经过一次编译（否则画师串/基础正向会被加两遍）。
+  const plan = {
+    capabilities: resolveCapabilities(novai.model),
+    compiled: {
+      positive: prompt,
+      negative: negativePrompt || novai.negativePrompt,
+      characters: Array.isArray(source.characters) ? source.characters : [],
+      warnings: [],
+    },
+  };
+
+  const render = await renderWithNovelAi(novai, plan, onStage, {
+    albumId: targetAlbumId,
+    signal,
+  });
 
   const record = makeHistoryRecord({
-    filename,
-    relativePath,
+    filename: render.filename,
+    relativePath: render.relativePath,
     albumId: targetAlbumId,
     parentId: source.id,
     recordId: recordEntity.id,
@@ -3957,8 +4165,10 @@ async function rerenderFromHistory(historyId, options = {}, onStage = () => {}, 
     userText: recordEntity.userText,
     prompt,
     llmTags: variant.llmTags,
+    characters: plan.compiled.characters,
+    negativePrompt: plan.compiled.negative,
     novai,
-    seed,
+    seed: render.seed,
     llmProvider: source.llmProvider,
     llmModel: source.llmModel,
     startedAt,
@@ -4343,6 +4553,20 @@ function publicErrorInfo(error) {
   if (error instanceof AppError) {
     return { status: error.status, code: error.code, message: error.message };
   }
+  if (error instanceof NaiError) {
+    // 上游状态码不直接透传：浏览器侧只区分「我方参数问题(400)」「已取消(499)」
+    // 「上游问题(502)」，具体原因看 code。
+    const status = error.kind === 'config' || error.kind === 'input'
+      ? 400
+      : error.kind === 'aborted'
+        ? 499
+        : 502;
+    return {
+      status,
+      code: error.code || 'NAI_ERROR',
+      message: error.message || 'NovelAI 请求失败。',
+    };
+  }
   if (error?.expose && Number.isInteger(error?.statusCode)) {
     return {
       status: error.statusCode,
@@ -4372,6 +4596,172 @@ app.post(
   asyncRoute(async (req, res) => {
     const config = await saveConfig(req.body);
     res.json({ config, savedAt: new Date().toISOString() });
+  }),
+);
+
+app.get('/api/nai/capabilities', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    models: listModelCapabilities(),
+    ucPresets: UC_PRESETS,
+    qualityPresets: QUALITY_PRESETS,
+  });
+});
+
+app.get('/api/nai/diagnostics', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ items: clone(naiDiagnostics), limit: DIAGNOSTIC_LIMIT });
+});
+
+app.delete(
+  '/api/nai/diagnostics',
+  asyncRoute(async (req, res) => {
+    naiDiagnostics = [];
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.writeFile(diagnosticsPath(), JSON.stringify({ items: [] }, null, 2));
+    res.json({ ok: true, items: [] });
+  }),
+);
+
+function promptPresetState() {
+  return {
+    presets: listPromptPresets(activeConfig.llm.promptPresets),
+    activeId: activeConfig.llm.activePromptPresetId || '',
+    structuredOutput: activeConfig.llm.structuredOutput,
+    maxPresets: MAX_PROMPT_PRESETS,
+  };
+}
+
+function findPromptPreset(id) {
+  const key = asString(id, '').trim();
+  if (!key) return null;
+  return promptPresetState().presets.find((preset) => preset.id === key) || null;
+}
+
+app.get('/api/prompt-presets', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(promptPresetState());
+});
+
+app.post(
+  '/api/prompt-presets/save',
+  asyncRoute(async (req, res) => {
+    const incoming = isPlainObject(req.body?.preset) ? req.body.preset : null;
+    if (!incoming) throw new AppError('缺少预设内容。', 400, 'PRESET_REQUIRED');
+
+    const userPresets = normalizeUserPresets(activeConfig.llm.promptPresets);
+    const incomingId = incoming.builtin ? '' : asString(incoming.id, '').trim();
+    const existingIndex = incomingId
+      ? userPresets.findIndex((preset) => preset.id === incomingId)
+      : -1;
+
+    if (existingIndex < 0 && userPresets.length >= MAX_PROMPT_PRESETS) {
+      throw new AppError(
+        `提示词预设最多 ${MAX_PROMPT_PRESETS} 个，请先删除不用的。`,
+        409,
+        'PRESET_LIMIT',
+      );
+    }
+
+    const preset = normalizePromptPreset({
+      ...incoming,
+      id: existingIndex >= 0 ? userPresets[existingIndex].id : '',
+    });
+    if (!preset) {
+      throw new AppError('预设名称和至少一个提示词块都不能为空。', 400, 'PRESET_INVALID');
+    }
+
+    if (existingIndex >= 0) userPresets[existingIndex] = preset;
+    else userPresets.push(preset);
+
+    await saveConfig({ llm: { promptPresets: userPresets } });
+    res.json({ preset, ...promptPresetState() });
+  }),
+);
+
+app.post(
+  '/api/prompt-presets/delete',
+  asyncRoute(async (req, res) => {
+    const id = asString(req.body?.id, '').trim();
+    if (!id) throw new AppError('缺少预设 id。', 400, 'PRESET_ID_REQUIRED');
+    if (id.startsWith('builtin-')) {
+      throw new AppError('内置预设不能删除，可以「另存为」一份再改。', 400, 'PRESET_BUILTIN');
+    }
+
+    const userPresets = normalizeUserPresets(activeConfig.llm.promptPresets);
+    const next = userPresets.filter((preset) => preset.id !== id);
+    if (next.length === userPresets.length) {
+      throw new AppError('没有找到这个预设，可能已被删除。', 404, 'PRESET_NOT_FOUND');
+    }
+
+    const llm = { promptPresets: next };
+    if (activeConfig.llm.activePromptPresetId === id) llm.activePromptPresetId = '';
+    await saveConfig({ llm });
+    res.json(promptPresetState());
+  }),
+);
+
+app.post(
+  '/api/prompt-presets/apply',
+  asyncRoute(async (req, res) => {
+    const preset = findPromptPreset(req.body?.id);
+    if (!preset) throw new AppError('没有找到这个预设，可能已被删除。', 404, 'PRESET_NOT_FOUND');
+
+    const config = await saveConfig({
+      llm: {
+        promptBlocks: preset.blocks,
+        structuredOutput: preset.structuredOutput,
+        activePromptPresetId: preset.id,
+      },
+    });
+    res.json({ ...promptPresetState(), config });
+  }),
+);
+
+app.get(
+  '/api/prompt-presets/export',
+  asyncRoute(async (req, res) => {
+    const id = asString(req.query?.id, '').trim();
+    const presets = id
+      ? [findPromptPreset(id)].filter(Boolean)
+      : promptPresetState().presets;
+    if (!presets.length) {
+      throw new AppError('没有找到要导出的预设。', 404, 'PRESET_NOT_FOUND');
+    }
+    const text = exportPromptPresets(presets);
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="nai-atelier-prompt-presets-${Date.now()}.json"`,
+    );
+    res.send(text);
+  }),
+);
+
+app.post(
+  '/api/prompt-presets/import',
+  asyncRoute(async (req, res) => {
+    const text = asString(req.body?.text, '');
+    if (!text.trim()) throw new AppError('导入内容是空的。', 400, 'PRESET_IMPORT_EMPTY');
+
+    let imported;
+    try {
+      imported = parseImportText(text);
+    } catch (error) {
+      throw new AppError(error.message, 400, 'PRESET_IMPORT_INVALID');
+    }
+
+    const merged = mergeImportedPresets({
+      existing: activeConfig.llm.promptPresets,
+      imported,
+    });
+    await saveConfig({ llm: { promptPresets: merged.presets } });
+    res.json({
+      added: merged.added,
+      skipped: merged.skipped,
+      names: merged.names,
+      ...promptPresetState(),
+    });
   }),
 );
 

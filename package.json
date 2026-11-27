@@ -1,6 +1,6 @@
 {
   "name": "nai-atelier",
-  "version": "1.9.1",
+  "version": "2.0.0",
   "private": true,
   "description": "Local-first LLM tag generator + NovelAI image workbench",
   "main": "server.js",
@@ -9,7 +9,9 @@
     "dev": "node --watch server.js",
     "verify": "node scripts/verify.js",
     "test:sync": "node scripts/sync-selftest.js && node scripts/sync-e2e.js",
-    "test": "npm run verify && npm run test:sync"
+    "test": "npm run verify && npm run test:sync && npm run test:nai && npm run test:msgpack",
+    "test:nai": "node scripts/test-nai.js",
+    "test:msgpack": "node scripts/test-msgpack.js"
   },
   "engines": {
     "node": ">=18.17"

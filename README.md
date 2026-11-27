@@ -1,10 +1,10 @@
 # NAI Atelier
 
-一个本地运行的 **LLM Tags × NovelAI** 轻量级 WebUI。输入一段自然语言画面描述，后端先调用 LLM 生成英文 Danbooru 风格标签，再与基础正向提示词、画师串、负面提示词和生成参数一起提交给 NovelAI，最后把 ZIP 响应在内存中解压成 PNG 并保存到本地 `outputs/`。
+一个本地运行的 **LLM Tags × NovelAI** 轻量级 WebUI。输入一段自然语言画面描述，后端先调用 LLM 生成英文 Danbooru 风格标签（或结构化场景 JSON），再与基础正向提示词、画师串、角色提示词和生成参数一起提交给 NovelAI，最后把返回的图片保存到本地 `outputs/`。
 
 界面使用深色磨砂玻璃风格，布局与交互参考 SillyTavern：左侧配置栏，右侧画廊工作区，底部输入与 Generate 按钮。
 
-> 当前版本：**1.9.1**（2026-11-27）。本版重做手机端界面：底部四个 Tab（画廊 / 生成 / 队列 / 设置）切换全屏页面，画廊改成通栏双列卡片，画册切换和更多操作改用底部弹层，生成页独立输入框并显示最近作品，记录详情改成可上滑的底部抽屉，同时补齐刘海与手势条的安全区。桌面端（≥901px）保持原样。上一版 1.9.0 新增设备间同步：电脑和手机各自离线工作，连同一个 Wi-Fi 时点一下「同步」就把两边的作品、画册、创作记录、回收站和提示词收藏双向合并，不用再手工拷贝文件。同步走局域网端口 + 口令，图片按 SHA-256 校验，删除操作靠墓碑记录传播，不会再「删了又被对方同步回来」。配置（含 API Key）不参与同步，各端独立。`npm run verify` 仍是 **244 项全部通过**，另加 `npm run test:sync`（10 项合并单测 + 32 项双实例端到端）。
+> 当前版本：**2.0.0**（2026-11-27）。本版重做绘图内核：**V5 走官方流式协议**（`/ai/generate-image-stream` + multipart + MessagePack 帧，边收边解析，中间帧可显示进度）、**角色提示词与归一化坐标**（一图最多 10 个角色，双人以上不再串装）、**结构化提示词**（LLM 直接返回 `scene + characters[] + negative` 的 JSON，失败自动回退单行 tags）、**提示词预设**（4 个内置预设移植自 LittleWhiteBox 的 V5 / V4.5 / 场景规则指南，支持保存 / 导入 / 导出，方便横向对比不同提示词）、V5 的 `ucPresetId` / `qualityPresetId` / 透明背景 / Variety Boost 开关、**错误分类与 429/5xx 自动重试**、**请求诊断面板**，以及手机端的角色卡与预设区适配。`npm run verify` 扩到 **259 项**，并新增 `npm run test:nai`（41 项纯函数单测）与 `npm run test:msgpack`。上一版 1.9.1 重做手机端底部 Tab；1.9.0 新增设备间同步。
 
 ## 功能
 
@@ -14,9 +14,15 @@
 - **创作记录**：默认按原始输入分组。每条记录保存用户原始描述、多个可编辑的 LLM Tag 版本（含 LLM 标题）以及每个版本下的多张图片；支持 Tag 重 roll、同层并排对比、从任意版本继续生图、把原始输入一键填回输入框。旧作品会自动迁移为独立记录。
 - **提示词大编辑器**：基础正向 / 画师串 / 负面 / 提示词块 / 灯箱最终 Tag 都有铅笔按钮，可在独立大编辑器中修改并写回。
 - **可组合提示词结构**：可添加多段 System / Assistant / User 提示词，分别指定放在「用户输入之前」或「之后」，并调整顺序。
+- **提示词预设（内置 + 自定义）**：内置 4 套预设——基础 Tags、V5 场景式 Tags、V4.5 Tags、场景 JSON（结构化输出），规则移植自 LittleWhiteBox 的绘画提示词指南并做了适配；选中即应用到提示词结构，也可把当前提示词另存为自定义预设、删除、**导出 JSON** 或**导入 JSON**（同名自动加 `(2)` 后缀）。换预设不会动其他未保存的字段，方便对比不同提示词的实际出图效果。
+- **结构化提示词（可选）**：打开「结构化输出」后，LLM 直接返回 `{ title, scene, characters[], negative }` 的 JSON，服务端负责校验、去重与回退；解析失败或字段为空时自动退回「一行英文 tags」的老路径，不会因为模型不听话就生成失败。
+- **角色提示词与坐标**：最多 10 个角色，每个角色有自己的正向 / 负面提示词与 X / Y 站位（归一化 0–1，留空由服务端按人数自动排布）。角色词与 `char_captions` 由同一份数据编译，保证两处同源同序；V3 / Furry 这类不支持角色通道的模型会自动把角色词内联进正向并给出提示。
 - **可调生成参数**：温度、Top P、最大 Token、思考强度（`reasoning_effort`）与 LLM 请求超时（秒）。
-- **完整 NovelAI 参数**：模型版本、Sampler、Noise Schedule、Steps、Guidance、CFG Rescale、宽高、Seed、Quality Tags。
-- **提示词拼接**：`画师串 → LLM Tags → 基础正向`，自动去重并去除空标签；负面提示词同时作为 `negative_prompt` 与 `v4_negative_prompt` 发送。
+- **完整 NovelAI 参数**：模型版本（含 V5 Full Medium 蒸馏模型）、Sampler、Noise Schedule、Steps、Guidance、CFG Rescale、宽高、Seed；V5 额外支持 `ucPresetId`（负面预设强度）、`qualityPresetId`（质量词）、透明背景；V4.5 支持 Variety Boost。
+- **V5 流式协议**：V5 模型改走 `/ai/generate-image-stream`，请求体为 multipart（字段 `request`）+ `stream: "msgpack"`，响应是「4 字节大端长度 + MessagePack」的帧序列。服务端边收边解，`intermediate` 帧用来推进度，`final` 帧取 PNG；旧模型继续走 `/ai/generate-image` + ZIP，两条路径由能力表自动选择。
+- **错误分类与重试**：上游状态码归一成 `NAI_AUTH` / `NAI_QUOTA` / `NAI_BUSY` / `NAI_UNAVAILABLE` / `NAI_TIMEOUT` 等 code；429 最多自动重试 2 次、5xx 重试 1 次，队列里能看到「第 n 次重试」；失败原因不再是一句笼统的「生成失败」。
+- **请求诊断面板**：侧栏「最近请求」折叠面板显示最近 30 次调用的模型、传输方式、帧数、字节数、重试次数、耗时、警告与错误码，排查「为什么这张图不对/为什么失败」时不用翻终端日志。
+- **提示词拼接**：`画师串 → 场景 Tags → 角色内联（仅旧模型）→ 基础正向`，自动去重并去除空标签；负面提示词同时作为 `negative_prompt` 与 `v4_negative_prompt` 发送。
 - **实时阶段反馈**：通过 POST SSE 流接收后端真实阶段事件，而不是前端假动画：
   `正在请求 LLM → 正在调用 NovelAI → 正在解压 ZIP → 正在保存`。
 - **ZIP 内存解压**：不将临时 ZIP 写入磁盘，使用 `adm-zip` 在内存中找到第一张 PNG/JPEG/WebP 并保存。
@@ -114,7 +120,14 @@ outputs/.incoming/   # 同步过程中的临时目录，同步结束自动清空
 npm run verify
 ```
 
-会在临时目录里启动一份 `server.js`，配合本地假 LLM / 假 NovelAI 上游（含慢速模式，用于验证运行中取消），检查配置归一化、标签生成、提示词结构、模型拉取、LLM/NovelAI 预设、提示词拼接顺序与加权 Tag 去重、负面提示词、画册文件夹与归档、画册封面、作品排序、批量移动 / 删除、回收站恢复与清理、提示词收藏、单张删除、编辑提示词 / 模型重画、Tag 权重、生成队列（并发为 1、取消排队中与运行中任务、取消全部）、NovelAI 超时、创作记录（Tag 重 roll / 记录生图 / 标题与 Tags 编辑 / 重复输入归组）、错误处理以及重启恢复。当前 **244/244 全部通过**。不会读取真实 `data/config.json`、不访问外网、不消耗任何额度，结束后自动清理临时文件。
+会在临时目录里启动一份 `server.js`，配合本地假 LLM / 假 NovelAI 上游（含慢速模式，用于验证运行中取消；V5 走 MessagePack 流式假上游），检查配置归一化、标签生成、提示词结构、提示词预设的保存 / 应用 / 导入 / 导出 / 内置保护、能力表、模型拉取、LLM/NovelAI 预设、提示词拼接顺序与加权 Tag 去重、负面提示词、画册文件夹与归档、画册封面、作品排序、批量移动 / 删除、回收站恢复与清理、提示词收藏、单张删除、编辑提示词 / 模型重画、Tag 权重、生成队列（并发为 1、取消排队中与运行中任务、取消全部）、NovelAI 超时、创作记录（Tag 重 roll / 记录生图 / 标题与 Tags 编辑 / 重复输入归组）、诊断记录、错误处理以及重启恢复。当前 **259/259 全部通过**。不会读取真实 `data/config.json`、不访问外网、不消耗任何额度，结束后自动清理临时文件。
+
+另有两组不启动服务的单测：
+
+```powershell
+npm run test:nai      # 41 项：能力表、提示词编译、V5 / 旧模型请求体、结构化解析、预设导入导出
+npm run test:msgpack  # 48 项：MessagePack 解码器与 V5 帧解析（含逐字节喂入、截断、超限）
+```
 
 同步功能单独自检（同样不需要真实 Key）：
 
@@ -152,6 +165,18 @@ npm run test:sync
 
 最终发送顺序为：所有「之前」段（按列表顺序）→ 你输入的画面描述 → 所有「之后」段（按列表顺序）。空内容或删除全部段落时，只发送用户输入。
 
+#### 提示词预设与结构化输出
+
+「提示词预设」下拉框列出内置与自定义预设，切换后立即把预设里的提示词块写回 `promptBlocks` 并保存：
+
+- **内置预设**（不可删除，可「另存为」一份再改）：基础 Tags、V5 场景式 Tags、V4.5 Tags、场景 JSON；
+- **保存 / 更新**：把当前提示词块存成命名预设，选中自定义预设时按钮变为更新；
+- **导出**：下载 `nai-atelier-prompt-presets-<时间戳>.json`，可整份或单个导出；
+- **导入**：选择 JSON 文件后合并，同名预设自动加 `(2)` 后缀并分配新 id，不会覆盖已有内容；
+- 手动编辑任意提示词块会让下拉框回到「当前提示词（自定义）」，避免误以为还在用预设。
+
+打开「结构化输出」后，服务端会在提示词里追加 JSON 契约说明，并把 LLM 的返回按 `{ title, scene, characters[], negative }` 解析：模型返回带 ```json 围栏、前后有解释文字、字段缺失都能容错；如果最终拿不到任何场景或角色内容，会自动回退成单行 tags 的旧路径，并把原因写进诊断面板。
+
 #### LLM 预设
 
 顶部「当前配置」下拉框用于管理预设：
@@ -180,7 +205,9 @@ npm run test:sync
 ### NovelAI
 
 - **API Key**：NovelAI 的 **Persistent API Token**（通常以 `pst-` 开头），在 NovelAI Account Settings 中生成。它不是账户密码。
-- **模型**：内置 V5 / V4.5 / V4 / V3 / Furry V3。请选择账户可用的版本。
+- **模型**：内置 V5 Full / V5 Curated / **V5 Full Medium（蒸馏，14 步）** / V4.5 / V4 / V3 / Furry V3。请选择账户可用的版本；V5 Medium 的 Steps 与采样器由服务端锁定，界面上会置灰。
+- **V5 专用参数**：`ucPresetId`（负面预设强度：重度 / 轻度 / 人物特化 / 兽人特化 / 不使用）与 `qualityPresetId`（质量词：标准 / 轻度 / 不使用），只有 V5 模型显示；「透明背景」与 V4.5 的「Variety Boost」也会随模型切换显示或隐藏。
+- **角色提示词**：点「+ 添加角色」填写名字与角色正向提示词，可选负面提示词与 X / Y 站位；不填坐标时按人数自动均分站位（1 人居中，2 人 0.33 / 0.67，3 人 0.28 / 0.5 / 0.72）。角色数超过模型上限（V5 为 10、V4 系列为 6）时会截断并在提示里说明。
 - **尺寸**：宽高会按 64 对齐。常用 `832 × 1216` / `1216 × 832` / `1024 × 1024`。
 - **Seed**：填 `-1` 时每次自动生成随机种子；实际使用的 seed 会写入画廊记录。
 - **请求超时**：`30` – `900` 秒，默认 `300`，只作用于每次 NovelAI 生图请求；超时后任务失败，错误消息会带上配置的秒数。该值不随 NovelAI 预设保存。
@@ -636,29 +663,87 @@ DELETE /api/history/<id>?permanent=1  # 彻底删除，无法恢复
 
 从任务列表移除一条**已结束**的任务记录，返回 `{ deleted, jobs, running, queueLength, limits }`；任务仍在排队 / 运行中时返回 409 `JOB_ACTIVE`，不存在返回 404 `JOB_NOT_FOUND`。
 
+### 提示词预设 API（2.0.0）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/prompt-presets` | 返回 `{ presets, activeId, structuredOutput, maxPresets }`；`presets` 里内置预设带 `builtin: true` 与 `builtin-` 前缀 id，排在自定义预设之前 |
+| `POST` | `/api/prompt-presets/save` | body `{ preset: { id?, name, blocks[], structuredOutput?, structuredSchema? } }`；带已有自定义 `id` 为更新，否则新建。返回 `{ preset, presets, activeId, ... }` |
+| `POST` | `/api/prompt-presets/delete` | body `{ id }`；内置预设返回 400 `PRESET_BUILTIN`，不存在返回 404 `PRESET_NOT_FOUND`；删除当前应用中的预设会同时清空 `activeId` |
+| `POST` | `/api/prompt-presets/apply` | body `{ id }`；把预设的 `blocks` 写入 `llm.promptBlocks`、`structuredOutput` 写入同名字段，并记录 `activePromptPresetId`。返回 `{ ...状态, config }` |
+| `GET` | `/api/prompt-presets/export` | 直接返回附件 JSON：`{ app: "nai-atelier", kind: "nai-atelier/prompt-presets", version: 1, presets: [...] }`；可带 `?id=` 只导出一个 |
+| `POST` | `/api/prompt-presets/import` | body `{ text }`（文件内容字符串）；支持导出格式、`{ presets: [...] }`、单个预设、裸数组四种形态。同名自动加 `(2)` 后缀并分配新 id，返回 `{ added, skipped, names, ...状态 }` |
+
+预设上限 40 个、每份预设最多 24 个提示词块；名称必填且不超过 60 字，至少一个非空块。内置预设不可删除，但可以「另存为」自定义预设后再改。
+
+### 模型能力 API（2.0.0）
+
+`GET /api/nai/capabilities` 返回：
+
+```json
+{
+  "models": [
+    { "id": "nai-diffusion-5-full", "label": "V5 Full", "family": "v5", "transport": "msgpack-stream",
+      "maxCharacters": 10, "centerMode": "normalized", "supportsCharacterPrompts": true,
+      "supportsV5Presets": true, "supportsTransparentBackground": true, "supportsVibe": false,
+      "supportsVarietyBoost": false, "lockedSteps": null, "lockedSampler": null }
+  ],
+  "ucPresets": { "heavy": { "id": "heavy", "label": "重度（默认）", "legacyValue": 0 } },
+  "qualityPresets": { "standard": { "id": "standard", "label": "标准", "tags": "very aesthetic, masterpiece, no text" } }
+}
+```
+
+前端据此决定显示哪些控件、哪些参数要锁定，避免界面出现模型不支持却可点的开关。
+
+### 请求诊断 API（2.0.0）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/nai/diagnostics` | 返回 `{ items, limit }`，最多保留 30 条，新的在前；每条含 `ok`、`model`、`transport`、`endpoint`、`bytes`、`frames`、`attempts`、`characters`、`warnings`、`seed`、`elapsedMs`、`errorCode` / `errorMessage` |
+| `DELETE` | `/api/nai/diagnostics` | 清空诊断记录（同时写空 `data/diagnostics.json`） |
+
+诊断记录只保存请求的元信息（模型、传输、耗时、错误码、压缩后的提示词警告），不保存 API Key。
+
 ### `GET /api/health`
 
-返回运行状态，便于检查服务是否启动（1.8.0 的 `version` 为 `1.8.0`）。
+返回运行状态，便于检查服务是否启动（2.0.0 的 `version` 为 `2.0.0`）。
 
 ## 目录结构
 
 ```text
 D:\NAI-Atelier\
 ├─ package.json
-├─ server.js              # Express、LLM 适配器、NovelAI 调用、ZIP 解压、PNG 元数据 / sidecar、持久化
+├─ server.js              # Express 路由、LLM 适配器、生成流程编排、持久化、PNG 元数据 / sidecar
+├─ lib/
+│  ├─ msgpack.js          # 最小 MessagePack 解码器（V5 流式响应用，零依赖）
+│  ├─ nai/
+│  │  ├─ capabilities.js  # 模型能力表：端点 / 传输 / 角色上限 / 锁定参数 / uc 与 quality 预设
+│  │  ├─ payload.js       # V5 与旧模型的请求体构造（含 characterPrompts / char_captions）
+│  │  ├─ compile.js       # 提示词编译：画师串 → 场景 → 角色（仅旧模型）→ 基础正向，负数与坐标
+│  │  ├─ transport.js     # multipart 请求、msgpack 流式解析、超时、429 / 5xx 重试
+│  │  ├─ v5-stream.js     # 4 字节长度前缀 + MessagePack 的帧解析（跨 chunk、截断、超限）
+│  │  └─ errors.js        # NaiError 与状态码分类、重试决策
+│  └─ prompts/
+│     ├─ tags.js          # tag 去重 / 加权解析的唯一口径
+│     ├─ parse.js         # 结构化输出解析（剥围栏、括号配对、字段归一）
+│     ├─ presets.js       # 提示词预设的归一化、导入合并、导出格式
+│     └─ builtin-presets.js # 4 套内置提示词预设（移植自 LittleWhiteBox 指南并适配）
 ├─ scripts/
-│  └─ verify.js           # npm run verify 自检脚本（临时目录 + 假上游）
+│  ├─ verify.js           # npm run verify 自检（临时目录 + 假 LLM / 假 V5 流式上游）
+│  ├─ test-nai.js         # npm run test:nai 纯函数单测
+│  └─ test-msgpack.js     # npm run test:msgpack 解码器与帧解析单测
 ├─ public/
-│  ├─ index.html          # 页面结构（含「元数据」按钮与灯箱「下载元数据」）
-│  ├─ style.css           # 深色磨砂玻璃样式、批量条 / 队列 / 回收站 / 提示词库 / 权重编辑器与响应式布局
-│  └─ app.js              # 表单、SSE、画廊、拖拽排序、批量操作、队列轮询、回收站、提示词库、元数据导出、灯箱
+│  ├─ index.html          # 页面结构（提示词预设、V5 参数、角色卡、诊断面板）
+│  ├─ style.css           # 深色磨砂玻璃样式、批量条 / 队列 / 回收站 / 提示词库 / 权重编辑器 / 角色卡与响应式布局
+│  └─ app.js              # 表单、SSE、画廊、拖拽排序、批量操作、队列轮询、预设管理、角色编辑、诊断面板、灯箱
 ├─ data/                  # 运行时自动生成
 │  ├─ config.json
 │  ├─ history.json
 │  ├─ records.json         # 创作记录：原始输入、Tag 版本与标题
 │  ├─ albums.json         # 画册列表（含封面 coverId）
 │  ├─ trash.json          # 回收站索引
-│  └─ prompts.json        # 提示词收藏
+│  ├─ prompts.json        # 提示词收藏
+│  └─ diagnostics.json    # 最近 30 次 NovelAI 请求的诊断记录
 ├─ outputs/               # 生成图片（未分类）
 │  ├─ albums/<画册ID>/    # 画册图片（每本画册一个真实文件夹，含同名 .json）
 │  ├─ .trash/             # 回收站图片（隐藏目录）
@@ -668,16 +753,14 @@ D:\NAI-Atelier\
 
 ## NovelAI 请求要点
 
-- 端点：`POST https://image.novelai.net/ai/generate-image`
-- Header：`Authorization: Bearer <NAI_TOKEN>`
-- 请求体包含 `input`、`model`、`action: "generate"` 和 `parameters`。
-- V4 / V4.5 / V5 会发送结构化提示词：
-  - `v4_prompt.caption.base_caption`
-  - `v4_negative_prompt.caption.base_caption`
-- V5 使用 `params_version: 4`，V4/V3 使用 `params_version: 3`。
-- NovelAI 返回 **ZIP**，代码在内存中用 `AdmZip` 读取图片条目，不保存 ZIP 文件；检测图片真实签名后以唯一文件名保存到 `outputs/`（若指定画册则保存到 `outputs/albums/<画册ID>/`）。
+- 旧模型（V4.5 / V4 / V3 / Furry）：`POST https://image.novelai.net/ai/generate-image`，Header `Authorization: Bearer <NAI_TOKEN>`，请求体含 `input`、`model`、`action: "generate"` 与 `parameters`；响应是 **ZIP**，在内存中用 `AdmZip` 取第一张图片，不落盘。
+- V5 模型：`POST https://image.novelai.net/ai/generate-image-stream`，body 为 **multipart/form-data**（单字段 `request`，filename `blob`，内容类型 JSON），`parameters` 里带 `stream: "msgpack"`、`params_version: 4`、`ucPresetId`、`qualityPresetId`、`use_coords`、`straight_alpha` 与 `characterPrompts`；响应是 `4 字节大端长度 + MessagePack` 的帧序列，只取 `event_type: "final"` 且 `samp_ix === 0` 的帧里的 PNG。
+- 结构化提示词：V4.5 / V4 / V5 会发送 `v4_prompt.caption.base_caption` 与 `v4_negative_prompt.caption.base_caption`；有角色时额外发送 `characterPrompts[]` 与 `char_captions[]`（两处同源同序，坐标写在 `centers`）。V3 只发送扁平的正 / 负面提示词。
+- `params_version`：V5 为 `4`，V4 / V3 为 `3`。
+- V4.5 开启 Variety Boost 时按分辨率计算 `skip_cfg_above_sigma = sqrt(w*h/1011712)*58`，避免高分辨率下 CFG 过早衰减。
+- 上游错误会归一成 `NaiError`：`NAI_AUTH`（401/403）、`NAI_QUOTA`（402）、`NAI_BUSY`（429，自动重试）、`NAI_UNAVAILABLE` / `NAI_UPSTREAM_ERROR`（5xx）、`NAI_TIMEOUT`、`NAI_BAD_REQUEST`（400/422）。HTTP 层只向浏览器暴露 400（参数问题）/ 499（已取消）/ 502（上游问题），避免把上游状态码误当成本地权限问题。
 
-> 模型名称和接口字段会随 NovelAI 更新而变化。若某个新模型报参数错误，可先切换到已支持版本，或在此基础上调整 `server.js` 中的 `buildNaiPayload()`。
+> 模型名称和接口字段会随 NovelAI 更新而变化。V5 的流式格式是按公开实现逆向整理的，若官方改版导致解析失败，`lib/nai/v5-stream.js` 会报 `V5_STREAM_*` 错误并保留原始诊断信息；也可在能力表 `lib/nai/capabilities.js` 里把该模型临时改回旧的 `image` 传输。
 
 ## 可选环境变量
 
@@ -709,6 +792,7 @@ $env:PORT=4000; npm start
 
 | 版本 | 主要变化 |
 | --- | --- |
+| 2.0.0 | 绘图内核重做：V5 流式协议（multipart + MessagePack，中间帧进度）、角色提示词与归一化坐标、结构化提示词 JSON（失败回退 tags）、提示词预设（4 套内置 + 导入导出）、`ucPresetId` / `qualityPresetId` / 透明背景 / Variety Boost、错误分类与 429/5xx 自动重试、请求诊断面板、V5 Full Medium；`lib/` 拆分能力表 / 编译 / 请求体 / 传输 / 流解析；自检 259 项 + `test:nai` 41 项 + `test:msgpack` 48 项 |
 | 1.9.1 | 手机端底部 Tab 重构：画廊 / 生成 / 队列 / 设置四个全屏页面、通栏双列卡片、画册与操作底部弹层、生成页最近作品条、记录详情底部抽屉、多选模式、安全区适配；桌面端不变 |
 | 1.9.0 | 设备间同步：局域网口令认证的双向合并（作品 / 画册 / 创作记录 / 回收站 / 提示词），删除墓碑、排序时间戳、SHA-256 文件校验、同步前自动备份索引；画廊「同步」面板；`npm run test:sync`（10 单测 + 32 双实例端到端） |
 | 1.8.0 | 创作记录（原始输入 → 多个可编辑 Tag 版本 → 多张图片）、Tag 重 roll 与同层对比、记录标题编辑、原始输入回填；NAI 预设 JSON 导入 / 导出；提示词铅笔大编辑器；历史原始输入展示；自检扩到 244 项 |

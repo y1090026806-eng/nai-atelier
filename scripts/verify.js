@@ -87,10 +87,117 @@ function readBody(req) {
 const MOCK_LLM_TAGS =
   'Here are the tags:\n```\n1girl, solo, rain, city_lights\n```\nTITLE: 雨夜电车月台';
 
+const MOCK_LLM_STRUCTURED = JSON.stringify({
+  title: '双人雨夜',
+  scene: '2girls, rain, city_lights, night',
+  characters: [
+    { name: '少女', prompt: '1girl, silver hair, school uniform', center: { x: 0.33, y: 0.5 } },
+    { name: '同伴', prompt: '1girl, black hair, coat', center: { x: 0.67, y: 0.5 } },
+  ],
+  negative: 'lowres, bad anatomy',
+});
+
 function buildZip(entries) {
   const zip = new AdmZip();
   for (const [name, buffer] of entries) zip.addFile(name, buffer);
   return zip.toBuffer();
+}
+
+/* ----------------------------------------------------------------------- */
+/* 极简 MessagePack 编码器 —— 只用于 mock 的 V5 流式响应                     */
+/* ----------------------------------------------------------------------- */
+
+function encodeMsgpack(value) {
+  if (value === null || value === undefined) return Buffer.from([0xc0]);
+  if (typeof value === 'boolean') return Buffer.from([value ? 0xc3 : 0xc2]);
+
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      const buf = Buffer.alloc(9);
+      buf[0] = 0xcb;
+      buf.writeDoubleBE(value, 1);
+      return buf;
+    }
+    if (value >= 0) {
+      if (value < 0x80) return Buffer.from([value]);
+      if (value < 0x100) return Buffer.from([0xcc, value]);
+      if (value < 0x10000) {
+        const buf = Buffer.alloc(3);
+        buf[0] = 0xcd;
+        buf.writeUInt16BE(value, 1);
+        return buf;
+      }
+      const buf = Buffer.alloc(5);
+      buf[0] = 0xce;
+      buf.writeUInt32BE(value, 1);
+      return buf;
+    }
+    if (value >= -32) return Buffer.from([0x100 + value]);
+    const buf = Buffer.alloc(3);
+    buf[0] = 0xd1;
+    buf.writeInt16BE(value, 1);
+    return buf;
+  }
+
+  if (typeof value === 'string') {
+    const text = Buffer.from(value, 'utf8');
+    if (text.length < 32) return Buffer.concat([Buffer.from([0xa0 | text.length]), text]);
+    if (text.length < 0x100) return Buffer.concat([Buffer.from([0xd9, text.length]), text]);
+    const head = Buffer.alloc(3);
+    head[0] = 0xda;
+    head.writeUInt16BE(text.length, 1);
+    return Buffer.concat([head, text]);
+  }
+
+  if (Buffer.isBuffer(value)) {
+    if (value.length < 0x100) return Buffer.concat([Buffer.from([0xc4, value.length]), value]);
+    const head = Buffer.alloc(3);
+    head[0] = 0xc5;
+    head.writeUInt16BE(value.length, 1);
+    return Buffer.concat([head, value]);
+  }
+
+  if (Array.isArray(value)) {
+    const head = value.length < 16 ? Buffer.from([0x90 | value.length]) : null;
+    const parts = value.map(encodeMsgpack);
+    if (head) return Buffer.concat([head, ...parts]);
+    const big = Buffer.alloc(3);
+    big[0] = 0xdc;
+    big.writeUInt16BE(value.length, 1);
+    return Buffer.concat([big, ...parts]);
+  }
+
+  const entries = Object.entries(value);
+  const parts = [];
+  for (const [key, item] of entries) {
+    parts.push(encodeMsgpack(key), encodeMsgpack(item));
+  }
+  if (entries.length < 16) return Buffer.concat([Buffer.from([0x80 | entries.length]), ...parts]);
+  const head = Buffer.alloc(3);
+  head[0] = 0xde;
+  head.writeUInt16BE(entries.length, 1);
+  return Buffer.concat([head, ...parts]);
+}
+
+/** 一帧 = 4 字节大端长度 + msgpack 负载。 */
+function msgpackFrame(value) {
+  const payload = encodeMsgpack(value);
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(payload.length, 0);
+  return Buffer.concat([head, payload]);
+}
+
+/** V5 请求是 multipart，只有一个字段 request，内容是 JSON。 */
+function parseMultipartRequest(body) {
+  const marker = body.indexOf('name="request"');
+  if (marker < 0) return null;
+  const bodyStart = body.indexOf('\r\n\r\n', marker);
+  if (bodyStart < 0) return null;
+  const bodyEnd = body.lastIndexOf('\r\n--');
+  const json = body
+    .subarray(bodyStart + 4, bodyEnd < 0 ? body.length : bodyEnd)
+    .toString('utf8');
+  return JSON.parse(json);
 }
 
 async function startMock() {
@@ -115,10 +222,11 @@ async function startMock() {
         res.end('{"error":{"message":"mock bad key"}}');
         return;
       }
+      const content = mock.llmMode === 'structured' ? MOCK_LLM_STRUCTURED : MOCK_LLM_TAGS;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
-          choices: [{ message: { content: MOCK_LLM_TAGS }, finish_reason: 'stop' }],
+          choices: [{ message: { content }, finish_reason: 'stop' }],
         }),
       );
       return;
@@ -133,6 +241,35 @@ async function startMock() {
           data: [{ id: 'mock-chat' }, { id: 'models/gemini-mock' }, { id: 'z-alt' }],
         }),
       );
+      return;
+    }
+
+    if (url.pathname === '/ai/generate-image-stream') {
+      const parsed = parseMultipartRequest(body);
+      mock.naiRequests.push(parsed);
+      if (mock.naiMode === 'error') {
+        res.writeHead(402, { 'Content-Type': 'application/json' });
+        res.end('{"message":"mock anlas shortage"}');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/x-msgpack' });
+      if (mock.naiMode === 'no-image') {
+        res.end(msgpackFrame({ event_type: 'error', message: 'mock no image' }));
+        return;
+      }
+      if (mock.naiMode === 'slow') {
+        let responded = false;
+        const noteAbort = () => {
+          if (!responded) mock.naiAborts += 1;
+        };
+        req.on('aborted', noteAbort);
+        res.on('close', noteAbort);
+        await sleep(2500);
+        if (res.destroyed || res.writableEnded) return;
+        responded = true;
+      }
+      res.write(msgpackFrame({ event_type: 'intermediate', samp_ix: 0, step_ix: 1, image: PNG_1PX }));
+      res.end(msgpackFrame({ event_type: 'final', samp_ix: 0, step_ix: 2, image: PNG_1PX }));
       return;
     }
 
@@ -2734,7 +2871,7 @@ async function run() {
   check(
     'NovelAI 402 映射为友好错误',
     naiError.status === 502 &&
-      naiError.body?.error?.code === 'NAI_UPSTREAM_ERROR' &&
+      naiError.body?.error?.code === 'NAI_QUOTA' &&
       naiError.body.error.message.includes('mock anlas shortage'),
     naiError.body?.error?.message,
   );
@@ -3078,6 +3215,189 @@ async function run() {
     '不存在的记录返回 404',
     missingRecord.status === 404 && missingRecord.body?.error?.code === 'RECORD_NOT_FOUND',
   );
+
+  /* 提示词预设：内置 / 保存 / 应用 / 导出 / 导入 */
+  const pbCapabilityInfo = await request('GET', '/api/nai/capabilities');
+  const pbCapabilityModels = pbCapabilityInfo.body?.models || [];
+  const pbV5Capability = pbCapabilityModels.find((item) => item.id === 'nai-diffusion-5-full');
+  const pbV5MediumCapability = pbCapabilityModels.find(
+    (item) => item.id === 'nai-diffusion-5-full-medium',
+  );
+  check(
+    '能力表返回 V5 与 V5 Medium',
+    pbCapabilityInfo.status === 200 &&
+      Boolean(pbV5Capability?.transport === 'msgpack-stream') &&
+      pbV5MediumCapability?.lockedSteps === 14,
+    JSON.stringify(pbCapabilityInfo.body?.models),
+  );
+  check(
+    '能力表返回 uc / quality 预设',
+    Object.values(pbCapabilityInfo.body?.ucPresets || {}).some((item) => item.id === 'heavy') &&
+      Object.values(pbCapabilityInfo.body?.qualityPresets || {}).some((item) => item.id === 'standard'),
+    JSON.stringify({ uc: pbCapabilityInfo.body?.ucPresets?.length }),
+  );
+
+  const pbPresetList = await request('GET', '/api/prompt-presets');
+  const pbBuiltinPresets = (pbPresetList.body?.presets || []).filter((item) => item.builtin);
+  check(
+    '内置提示词预设随服务返回',
+    pbPresetList.status === 200 &&
+      pbBuiltinPresets.length >= 4 &&
+      pbBuiltinPresets.every((item) => item.id.startsWith('builtin-')),
+    JSON.stringify(pbBuiltinPresets.map((item) => item.id)),
+  );
+
+  const pbPresetSaved = await request('POST', '/api/prompt-presets/save', {
+    body: {
+      preset: {
+        name: '测试预设',
+        structuredOutput: true,
+        blocks: [{ role: 'system', position: 'before', enabled: true, content: '只输出 JSON。' }],
+      },
+    },
+  });
+  const pbCustomPreset = pbPresetSaved.body?.preset;
+  check(
+    '保存提示词预设返回条目',
+    pbPresetSaved.status === 200 &&
+      Boolean(pbCustomPreset?.id) &&
+      pbCustomPreset?.blocks?.[0]?.content === '只输出 JSON。',
+    JSON.stringify(pbPresetSaved.body),
+  );
+
+  const pbPresetApplied = await request('POST', '/api/prompt-presets/apply', {
+    body: { id: pbCustomPreset?.id },
+  });
+  check(
+    '应用预设会替换提示词块并打开结构化输出',
+    pbPresetApplied.status === 200 &&
+      pbPresetApplied.body?.activeId === pbCustomPreset?.id &&
+      pbPresetApplied.body?.config?.llm?.promptBlocks?.[0]?.content === '只输出 JSON。' &&
+      pbPresetApplied.body?.config?.llm?.structuredOutput === true,
+    JSON.stringify(pbPresetApplied.body?.config?.llm?.structuredOutput),
+  );
+
+  const pbPresetExported = await request('GET', '/api/prompt-presets/export', { raw: true });
+  let pbExportedDoc = null;
+  try {
+    pbExportedDoc = JSON.parse(pbPresetExported.text);
+  } catch {
+    pbExportedDoc = null;
+  }
+  check(
+    '导出预设为可再次导入的 JSON',
+    pbPresetExported.status === 200 &&
+      pbPresetExported.headers.get('content-disposition')?.includes('attachment') &&
+      pbExportedDoc?.kind === 'nai-atelier/prompt-presets' &&
+      pbExportedDoc?.presets?.length >= 1,
+    String(pbPresetExported.text).slice(0, 120),
+  );
+
+  const pbPresetImported = await request('POST', '/api/prompt-presets/import', {
+    body: {
+      text: JSON.stringify({
+        app: 'nai-atelier',
+        kind: 'nai-atelier/prompt-presets',
+        version: 1,
+        presets: [
+          {
+            name: '测试预设',
+            blocks: [{ role: 'system', position: 'before', enabled: true, content: '导入的内容。' }],
+          },
+        ],
+      }),
+    },
+  });
+  check(
+    '导入同名预设自动改名而不是覆盖',
+    pbPresetImported.status === 200 &&
+      pbPresetImported.body?.added === 1 &&
+      (pbPresetImported.body?.names || []).some((name) => String(name).includes('(2)')),
+    JSON.stringify({ added: pbPresetImported.body?.added, names: pbPresetImported.body?.names }),
+  );
+
+  const pbPresetDeleteBuiltin = await request('POST', '/api/prompt-presets/delete', {
+    body: { id: pbBuiltinPresets[0]?.id },
+  });
+  check(
+    '内置预设禁止删除',
+    pbPresetDeleteBuiltin.status === 400 &&
+      pbPresetDeleteBuiltin.body?.error?.code === 'PRESET_BUILTIN',
+    JSON.stringify(pbPresetDeleteBuiltin.body),
+  );
+
+  const configAfterPreset = await request('GET', '/api/config');
+  check(
+    '预设与 V5 参数写入配置',
+    configAfterPreset.body?.config?.llm?.structuredOutput === true &&
+      configAfterPreset.body?.config?.llm?.activePromptPresetId === pbCustomPreset?.id &&
+      configAfterPreset.body?.config?.novelai?.ucPresetId === 'heavy' &&
+      configAfterPreset.body?.config?.novelai?.qualityPresetId === 'standard' &&
+      Array.isArray(configAfterPreset.body?.config?.novelai?.characters),
+    JSON.stringify({
+      uc: configAfterPreset.body?.config?.novelai?.ucPresetId,
+      characters: configAfterPreset.body?.config?.novelai?.characters?.length,
+    }),
+  );
+
+  const pbDiagnostics = await request('GET', '/api/nai/diagnostics');
+  check(
+    '诊断记录接口可读',
+    pbDiagnostics.status === 200 && Array.isArray(pbDiagnostics.body?.items),
+    JSON.stringify(pbDiagnostics.body),
+  );
+
+  const pbDiagnosticsCleared = await request('DELETE', '/api/nai/diagnostics');
+  check(
+    '诊断记录可清空',
+    pbDiagnosticsCleared.status === 200 && (pbDiagnosticsCleared.body?.items || []).length === 0,
+  );
+
+  /* 结构化提示词：JSON 契约 → 角色提示词 → V5 请求体 */
+  await setConfig({ llm: { structuredOutput: true } });
+  await setMockMode({ llmMode: 'structured' });
+  const structuredRun = await generate('双人雨夜，两个女孩站在便利店门口');
+  const structuredHint = mock.llmRequests.at(-1)?.body?.messages?.at(-1)?.content || '';
+  check(
+    '结构化模式在提示词里追加 JSON 契约',
+    structuredHint.includes('"characters"') && structuredHint.includes('归一化坐标'),
+    String(structuredHint).slice(-160),
+  );
+  check(
+    '结构化输出拆成场景与角色',
+    structuredRun.status === 200 &&
+      String(structuredRun.body?.result?.llmTags || '') === '2girls, rain, city_lights, night' &&
+      String(mock.naiRequests.at(-1)?.parameters?.negative_prompt || '').includes('lowres'),
+    JSON.stringify({
+      tags: structuredRun.body?.result?.llmTags,
+      negative: mock.naiRequests.at(-1)?.parameters?.negative_prompt,
+    }),
+  );
+  const structuredPayload = mock.naiRequests.at(-1)?.parameters || {};
+  const structuredCaptions = structuredPayload?.v4_prompt?.caption?.char_captions || [];
+  check(
+    '角色同时进入 characterPrompts 与 char_captions',
+    Array.isArray(structuredPayload.characterPrompts) &&
+      structuredPayload.characterPrompts.length === 2 &&
+      structuredCaptions.length === 2 &&
+      structuredCaptions[0]?.char_caption === structuredPayload.characterPrompts[0]?.prompt &&
+      structuredPayload.use_coords === true,
+    JSON.stringify({
+      prompts: structuredPayload.characterPrompts?.length,
+      captions: structuredCaptions.length,
+    }),
+  );
+
+  await setMockMode({ llmMode: 'tags' });
+  const fallbackRun = await generate('结构化失败时的回退测试');
+  check(
+    '模型不返回 JSON 时回退为一行 tags',
+    fallbackRun.status === 200 &&
+      String(fallbackRun.body?.result?.llmTags || '').includes('1girl') &&
+      String(fallbackRun.body?.result?.llmTags || '').includes('city_lights'),
+    JSON.stringify(fallbackRun.body?.result?.llmTags),
+  );
+  await setConfig({ llm: { structuredOutput: false } });
 }
 
 /* ----------------------------------------------------------------------- */

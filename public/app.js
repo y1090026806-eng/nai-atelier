@@ -115,6 +115,14 @@
     activePresetId: 'current',
     naiPresets: [],
     activeNaiPresetId: 'current',
+    promptPresets: [],
+    activePromptPresetId: 'custom',
+    promptPresetBuiltin: new Set(),
+    structuredOutput: false,
+    characters: [],
+    capabilities: null,
+    diagnostics: [],
+    capabilitiesLoaded: false,
     availableModels: [],
     availableModelsBaseUrl: '',
     elapsedTimer: null,
@@ -180,6 +188,31 @@
       'prompt-blocks',
       'prompt-blocks-count',
       'prompt-block-add',
+      'prompt-preset',
+      'prompt-preset-hint',
+      'prompt-preset-save',
+      'prompt-preset-delete',
+      'prompt-preset-export',
+      'prompt-preset-import',
+      'prompt-preset-file',
+      'structured-output',
+      'uc-preset',
+      'quality-preset',
+      'v5-preset-fields',
+      'v5-preset-help',
+      'transparent-field',
+      'transparent-bg',
+      'variety-field',
+      'variety-boost',
+      'character-list',
+      'character-add',
+      'characters-hint',
+      'characters-help',
+      'diag-panel',
+      'diag-list',
+      'diag-hint',
+      'diag-refresh',
+      'diag-clear',
       'nai-api-key',
       'nai-preset',
       'nai-preset-save',
@@ -1150,6 +1183,8 @@
       reasoningEffort: ui.llmReasoning.value,
       timeoutSeconds: Number(ui.llmTimeout.value),
       promptBlocks: clonePromptBlocks(state.promptBlocks),
+      structuredOutput: state.structuredOutput === true,
+      activePromptPresetId: state.activePromptPresetId || '',
       availableModels: [...state.availableModels],
       availableModelsBaseUrl: state.availableModelsBaseUrl,
     };
@@ -1349,6 +1384,12 @@
     return select;
   }
 
+  function markPromptDiverged() {
+    if (!state.activePromptPresetId) return;
+    state.activePromptPresetId = '';
+    renderPromptPresetSelect();
+  }
+
   function renderPromptBlocks() {
     const fragment = document.createDocumentFragment();
 
@@ -1412,6 +1453,7 @@
         block.role === 'system' ? '系统指令，例如标签生成规则…' : '这段提示词的内容…';
       area.addEventListener('input', () => {
         block.content = area.value;
+        markPromptDiverged();
         markDirty();
       });
 
@@ -1432,6 +1474,7 @@
       enabled: true,
       content: '',
     });
+    markPromptDiverged();
     markDirty();
     renderPromptBlocks();
     const areas = ui.promptBlocks.querySelectorAll('textarea');
@@ -1440,6 +1483,7 @@
 
   function removePromptBlock(id) {
     state.promptBlocks = state.promptBlocks.filter((block) => block.id !== id);
+    markPromptDiverged();
     markDirty();
     renderPromptBlocks();
   }
@@ -1678,6 +1722,567 @@
     showToast(`已载入预设「${preset.name}」，保存后生效。`, 'info', 3800);
   }
 
+  /* Model capabilities ----------------------------------------------------- */
+
+  function findCapability(modelId) {
+    const models = state.capabilities?.models || [];
+    return models.find((item) => item.id === modelId) || null;
+  }
+
+  function setHidden(node, hidden) {
+    if (node) node.hidden = Boolean(hidden);
+  }
+
+  function fillPresetOptions(select, presets, current) {
+    if (!select || !presets) return;
+    const rows = Object.values(presets);
+    if (!rows.length) return;
+    select.replaceChildren(...rows.map((item) => new Option(item.label || item.id, item.id)));
+    select.value = current || rows[0].id;
+  }
+
+  /**
+   * 按当前模型切换 UI：V5 才有 ucPresetId / qualityPresetId / 透明背景，
+   * V4.5 才有 Variety Boost，V5 Medium 的 steps 与采样器是锁死的。
+   */
+  function updateNaiCapabilityUi() {
+    const model = ui.naiModel?.value || '';
+    const cap = findCapability(model);
+    const isV5 = cap ? cap.transport === 'msgpack-stream' : /^nai-diffusion-5/.test(model);
+    const supportsVariety = cap ? cap.supportsVarietyBoost === true : /^nai-diffusion-4-5/.test(model);
+    const supportsTransparent = cap
+      ? cap.supportsTransparentBackground === true
+      : isV5;
+    const supportsCharacters = cap
+      ? cap.supportsCharacterPrompts !== false && cap.maxCharacters > 0
+      : true;
+
+    setHidden(ui.v5PresetFields, !isV5);
+    setHidden(ui.v5PresetHelp, !isV5);
+    setHidden(ui.transparentField, !supportsTransparent);
+    setHidden(ui.varietyField, !supportsVariety);
+
+    if (!supportsTransparent && ui.transparentBg) ui.transparentBg.checked = false;
+    if (!supportsVariety && ui.varietyBoost) ui.varietyBoost.checked = false;
+
+    if (ui.charactersHelp) {
+      ui.charactersHelp.textContent = supportsCharacters
+        ? '每个角色单独写外貌与着装，能显著减少多人图「串装」。坐标留空则自动均分站位。'
+        : '当前模型没有角色提示词通道，角色描述会合并进正向提示词；建议改用 V4.5 / V5 以获得更好的多人一致性。';
+    }
+    if (ui.characterList) {
+      ui.characterList.classList.toggle('is-inline-mode', !supportsCharacters);
+    }
+
+    if (ui.steps) {
+      if (cap?.lockedSteps) {
+        ui.steps.value = String(cap.lockedSteps);
+        ui.steps.disabled = true;
+      } else {
+        ui.steps.disabled = false;
+      }
+    }
+    if (ui.naiSampler) {
+      if (cap?.lockedSampler) {
+        ensureSelectOption(ui.naiSampler, cap.lockedSampler);
+        ui.naiSampler.disabled = true;
+      } else {
+        ui.naiSampler.disabled = false;
+      }
+    }
+    if (ui.charactersHint) {
+      ui.charactersHint.textContent = cap && supportsCharacters
+        ? `最多 ${cap.maxCharacters} 人`
+        : '';
+    }
+    syncRangeDisplays();
+  }
+
+  async function loadCapabilities() {
+    try {
+      const payload = await requestJson('/api/nai/capabilities');
+      state.capabilities = payload;
+      fillPresetOptions(ui.ucPreset, payload.ucPresets, ui.ucPreset?.value);
+      fillPresetOptions(ui.qualityPreset, payload.qualityPresets, ui.qualityPreset?.value);
+    } catch {
+      state.capabilities = null;
+    }
+    state.capabilitiesLoaded = true;
+    updateNaiCapabilityUi();
+  }
+
+  /* Prompt presets --------------------------------------------------------- */
+
+  function promptPresetEntries() {
+    return Array.isArray(state.promptPresets) ? state.promptPresets : [];
+  }
+
+  function renderPromptPresetSelect() {
+    if (!ui.promptPreset) return;
+    const entries = promptPresetEntries();
+    const builtin = entries.filter((item) => item.builtin);
+    const mine = entries.filter((item) => !item.builtin);
+
+    const options = [new Option('当前提示词（自定义）', 'custom')];
+    if (builtin.length) {
+      const group = document.createElement('optgroup');
+      group.label = '内置预设';
+      group.append(...builtin.map((item) => new Option(item.name, item.id)));
+      options.push(group);
+    }
+    if (mine.length) {
+      const group = document.createElement('optgroup');
+      group.label = '我的预设';
+      group.append(...mine.map((item) => new Option(item.name, item.id)));
+      options.push(group);
+    }
+
+    ui.promptPreset.replaceChildren(...options);
+    const active = entries.some((item) => item.id === state.activePromptPresetId)
+      ? state.activePromptPresetId
+      : 'custom';
+    ui.promptPreset.value = active;
+    state.activePromptPresetId = active === 'custom' ? '' : active;
+
+    const current = entries.find((item) => item.id === active);
+    if (ui.promptPresetDelete) {
+      ui.promptPresetDelete.disabled = !current || current.builtin === true;
+      ui.promptPresetDelete.title = current?.builtin
+        ? '内置预设不能删除，可以「保存当前为预设」另存一份'
+        : '删除当前选中的预设';
+    }
+    if (ui.promptPresetHint) {
+      ui.promptPresetHint.textContent = current
+        ? `${current.builtin ? '内置' : '自定义'} · ${current.blocks?.length || 0} 个块`
+        : '未被预设覆盖';
+    }
+  }
+
+  function applyPromptBlocksLocally(blocks, structuredOutput, presetId) {
+    state.promptBlocks = clonePromptBlocks(blocks);
+    state.structuredOutput = structuredOutput === true;
+    state.activePromptPresetId = presetId || '';
+    if (ui.structuredOutput) ui.structuredOutput.checked = state.structuredOutput;
+    renderPromptBlocks();
+    renderPromptPresetSelect();
+  }
+
+  async function loadPromptPresets() {
+    try {
+      const payload = await requestJson('/api/prompt-presets');
+      state.promptPresets = Array.isArray(payload.presets) ? payload.presets : [];
+      state.activePromptPresetId = asText(payload.activeId);
+      state.structuredOutput = payload.structuredOutput === true;
+      if (ui.structuredOutput) ui.structuredOutput.checked = state.structuredOutput;
+      renderPromptPresetSelect();
+    } catch {
+      state.promptPresets = [];
+      renderPromptPresetSelect();
+    }
+  }
+
+  async function handlePromptPresetChange() {
+    const id = ui.promptPreset.value;
+    if (!id || id === 'custom') {
+      state.activePromptPresetId = '';
+      renderPromptPresetSelect();
+      return;
+    }
+
+    const preset = promptPresetEntries().find((item) => item.id === id);
+    if (!preset) return;
+
+    try {
+      await requestJson('/api/prompt-presets/apply', {
+        method: 'POST',
+        body: JSON.stringify({ id }),
+      });
+      applyPromptBlocksLocally(preset.blocks, preset.structuredOutput, preset.id);
+      showToast(`已应用提示词预设「${preset.name}」。`, 'success', 3200);
+    } catch (error) {
+      showToast(error.message, 'error');
+      renderPromptPresetSelect();
+    }
+  }
+
+  async function handlePromptPresetSave() {
+    if (state.promptBlocks.length === 0) {
+      showToast('当前没有提示词块可保存。', 'warning');
+      return;
+    }
+
+    const current = promptPresetEntries().find(
+      (item) => item.id === state.activePromptPresetId && !item.builtin,
+    );
+    const name = await askPresetName({
+      title: current ? '重命名 / 更新提示词预设' : '保存提示词预设',
+      help: '保存「提示词结构」里的全部块与结构化输出开关，方便以后对比不同提示词的效果。',
+      value: current?.name || '我的提示词预设',
+      validate: (value) =>
+        promptPresetEntries().some(
+          (item) => item.id !== current?.id && item.name === value && !item.builtin,
+        )
+          ? '已存在同名预设，请换一个名称。'
+          : '',
+    });
+    if (!name) return;
+
+    try {
+      const payload = await requestJson('/api/prompt-presets/save', {
+        method: 'POST',
+        body: JSON.stringify({
+          preset: {
+            id: current?.id || '',
+            name,
+            blocks: clonePromptBlocks(state.promptBlocks),
+            structuredOutput: state.structuredOutput,
+          },
+        }),
+      });
+      state.promptPresets = Array.isArray(payload.presets) ? payload.presets : [];
+      state.activePromptPresetId = payload.preset?.id || state.activePromptPresetId;
+      renderPromptPresetSelect();
+      showToast(`已保存提示词预设「${name}」。`, 'success', 3200);
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  }
+
+  async function handlePromptPresetDelete() {
+    const id = state.activePromptPresetId;
+    const preset = promptPresetEntries().find((item) => item.id === id);
+    if (!preset || preset.builtin) return;
+
+    try {
+      const payload = await requestJson('/api/prompt-presets/delete', {
+        method: 'POST',
+        body: JSON.stringify({ id }),
+      });
+      state.promptPresets = Array.isArray(payload.presets) ? payload.presets : [];
+      state.activePromptPresetId = asText(payload.activeId);
+      renderPromptPresetSelect();
+      showToast(`已删除预设「${preset.name}」。`, 'success', 3000);
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  }
+
+  async function handlePromptPresetExport() {
+    try {
+      const response = await fetch('/api/prompt-presets/export', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`导出失败（HTTP ${response.status}）。`);
+      const text = await response.text();
+      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+      downloadBlob(`nai-atelier-prompt-presets-${stamp}.json`, text);
+      showToast('提示词预设已导出。', 'success', 3000);
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  }
+
+  async function handlePromptPresetImportFile(event) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const payload = await requestJson('/api/prompt-presets/import', {
+        method: 'POST',
+        body: JSON.stringify({ text }),
+      });
+      state.promptPresets = Array.isArray(payload.presets) ? payload.presets : [];
+      state.activePromptPresetId = asText(payload.activeId);
+      renderPromptPresetSelect();
+      const added = Number(payload.added) || 0;
+      const skipped = Number(payload.skipped) || 0;
+      showToast(
+        `已导入 ${added} 个提示词预设${skipped ? `，跳过 ${skipped} 个` : ''}。`,
+        'success',
+        4200,
+      );
+    } catch (error) {
+      showToast(error.message || '导入失败。', 'error');
+    } finally {
+      input.value = '';
+    }
+  }
+
+  /* Diagnostics ------------------------------------------------------------ */
+
+  function formatDiagTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '--:--';
+    return date.toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  function renderDiagnostics() {
+    if (!ui.diagList) return;
+    const items = Array.isArray(state.diagnostics) ? state.diagnostics.slice(0, 8) : [];
+    if (ui.diagHint) {
+      ui.diagHint.textContent = items.length ? `最近 ${items.length} 次` : '暂无记录';
+    }
+    if (items.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'diag-empty';
+      empty.textContent = '还没有请求记录。生成一张图后再回来看。';
+      ui.diagList.replaceChildren(empty);
+      return;
+    }
+
+    const rows = items.map((item) => {
+      const row = document.createElement('div');
+      row.className = `diag-row${item.ok ? '' : ' is-error'}`;
+
+      const head = document.createElement('div');
+      head.className = 'diag-head';
+      const mark = document.createElement('span');
+      mark.className = 'diag-mark';
+      mark.textContent = item.ok ? 'OK' : 'FAIL';
+      const time = document.createElement('span');
+      time.className = 'diag-time';
+      time.textContent = formatDiagTime(item.at);
+      const model = document.createElement('span');
+      model.className = 'diag-model';
+      model.textContent = asText(item.model) || '--';
+      head.append(mark, time, model);
+
+      const meta = document.createElement('div');
+      meta.className = 'diag-meta';
+      const bits = [];
+      if (item.transport) bits.push(item.transport === 'msgpack-stream' ? '流式' : 'ZIP');
+      if (item.frames) bits.push(`${item.frames} 帧`);
+      if (item.bytes) bits.push(`${Math.round(Number(item.bytes) / 1024)} KB`);
+      if (item.attempts > 1) bits.push(`重试 ${item.attempts - 1} 次`);
+      if (item.elapsedMs) bits.push(`${(Number(item.elapsedMs) / 1000).toFixed(1)}s`);
+      if (item.errorCode) bits.push(item.errorCode);
+      meta.textContent = bits.join(' · ');
+
+      row.append(head, meta);
+
+      const detailBits = [];
+      if (Array.isArray(item.warnings) && item.warnings.length) {
+        detailBits.push(item.warnings.join('；'));
+      }
+      if (item.errorMessage) detailBits.push(item.errorMessage);
+      if (detailBits.length) {
+        const detail = document.createElement('p');
+        detail.className = 'diag-detail';
+        detail.textContent = detailBits.join('；');
+        row.append(detail);
+      }
+      return row;
+    });
+
+    ui.diagList.replaceChildren(...rows);
+  }
+
+  async function loadDiagnostics() {
+    try {
+      const payload = await requestJson('/api/nai/diagnostics');
+      state.diagnostics = Array.isArray(payload.items) ? payload.items : [];
+    } catch {
+      state.diagnostics = [];
+    }
+    renderDiagnostics();
+  }
+
+  async function handleDiagClear() {
+    try {
+      await requestJson('/api/nai/diagnostics', { method: 'DELETE' });
+      state.diagnostics = [];
+      renderDiagnostics();
+      showToast('已清空诊断记录。', 'success', 2600);
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  }
+
+  /* Characters ------------------------------------------------------------- */
+
+  const MAX_CHARACTERS = 10;
+
+  function clampUnit(value, fallback = 0.5) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.min(1, Math.max(0, Math.round(num * 1000) / 1000));
+  }
+
+  function cloneCharacter(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const center = raw.center && typeof raw.center === 'object' ? raw.center : null;
+    const hasX = center && Number.isFinite(Number(center.x));
+    const hasY = center && Number.isFinite(Number(center.y));
+    return {
+      id: asText(raw.id) || uid(),
+      name: asText(raw.name),
+      prompt: asText(raw.prompt),
+      uc: asText(raw.uc),
+      center: hasX || hasY ? { x: clampUnit(center.x), y: clampUnit(center.y) } : null,
+    };
+  }
+
+  function cloneCharacters(list) {
+    return (Array.isArray(list) ? list : []).map(cloneCharacter).filter(Boolean).slice(0, MAX_CHARACTERS);
+  }
+
+  function collectCharacters() {
+    return state.characters
+      .map((item) => ({
+        id: item.id,
+        name: asText(item.name).trim(),
+        prompt: asText(item.prompt).trim(),
+        uc: asText(item.uc).trim(),
+        center: item.center ? { x: clampUnit(item.center.x), y: clampUnit(item.center.y) } : null,
+      }))
+      .filter((item) => item.name || item.prompt);
+  }
+
+  function renderCharacters() {
+    if (!ui.characterList) return;
+    ui.characterList.replaceChildren();
+
+    if (state.characters.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'character-empty';
+      empty.textContent = '还没有角色。单人图可以留空，多人图建议先在这里固定每个角色的外貌。';
+      ui.characterList.append(empty);
+    }
+
+    state.characters.forEach((character, index) => {
+      const card = document.createElement('div');
+      card.className = 'character-card';
+      card.dataset.characterId = character.id;
+
+      const head = document.createElement('div');
+      head.className = 'character-head';
+
+      const badge = document.createElement('span');
+      badge.className = 'character-index';
+      badge.textContent = String(index + 1);
+
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.className = 'character-name';
+      nameInput.value = character.name;
+      nameInput.placeholder = '角色名（如 爱丽丝）';
+      nameInput.setAttribute('aria-label', `第 ${index + 1} 个角色的名字`);
+      nameInput.addEventListener('input', () => {
+        character.name = nameInput.value;
+        markDirty();
+      });
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'character-remove';
+      remove.textContent = '×';
+      remove.title = '移除这个角色';
+      remove.setAttribute('aria-label', `移除角色 ${character.name || index + 1}`);
+      remove.addEventListener('click', () => {
+        state.characters = state.characters.filter((item) => item.id !== character.id);
+        renderCharacters();
+        markDirty();
+      });
+
+      head.append(badge, nameInput, remove);
+
+      const promptInput = document.createElement('textarea');
+      promptInput.rows = 2;
+      promptInput.className = 'character-prompt';
+      promptInput.spellcheck = false;
+      promptInput.value = character.prompt;
+      promptInput.placeholder = '固定外貌与着装：1girl, silver hair, red eyes, white dress…';
+      promptInput.setAttribute('aria-label', `${character.name || '角色'} 的外貌提示词`);
+      promptInput.addEventListener('input', () => {
+        character.prompt = promptInput.value;
+        markDirty();
+      });
+
+      const detail = document.createElement('details');
+      detail.className = 'character-detail';
+      const summary = document.createElement('summary');
+      summary.textContent = '负面词与坐标';
+
+      const ucInput = document.createElement('textarea');
+      ucInput.rows = 2;
+      ucInput.className = 'character-uc';
+      ucInput.spellcheck = false;
+      ucInput.value = character.uc;
+      ucInput.placeholder = '这个角色要避免的特征（可留空）';
+      ucInput.setAttribute('aria-label', `${character.name || '角色'} 的负面提示词`);
+      ucInput.addEventListener('input', () => {
+        character.uc = ucInput.value;
+        markDirty();
+      });
+
+      const coordRow = document.createElement('div');
+      coordRow.className = 'character-coords';
+
+      const makeCoord = (axis, label) => {
+        const wrap = document.createElement('label');
+        wrap.className = 'character-coord';
+        const text = document.createElement('span');
+        text.textContent = label;
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.min = '0';
+        input.max = '1';
+        input.step = '0.01';
+        input.inputMode = 'decimal';
+        input.value = character.center ? String(character.center[axis]) : '';
+        input.placeholder = '自动';
+        input.setAttribute('aria-label', `${character.name || '角色'} 的 ${label} 坐标`);
+        input.addEventListener('input', () => {
+          const raw = input.value.trim();
+          if (!raw) {
+            character.center = null;
+          } else {
+            const next = character.center ? { ...character.center } : { x: 0.5, y: 0.5 };
+            next[axis] = clampUnit(raw);
+            character.center = next;
+          }
+          markDirty();
+        });
+        wrap.append(text, input);
+        return wrap;
+      };
+
+      coordRow.append(makeCoord('x', 'X 0–1'), makeCoord('y', 'Y 0–1'));
+      const hint = document.createElement('p');
+      hint.className = 'character-coord-hint';
+      hint.textContent = '留空 = 自动排站位（1 人居中，2 人左右分站）';
+      coordRow.append(hint);
+
+      detail.append(summary, ucInput, coordRow);
+      card.append(head, promptInput, detail);
+      ui.characterList.append(card);
+    });
+
+    if (ui.charactersHint) {
+      ui.charactersHint.textContent = state.characters.length
+        ? `${state.characters.length} / ${MAX_CHARACTERS}`
+        : '';
+    }
+    if (ui.characterAdd) {
+      ui.characterAdd.disabled = state.characters.length >= MAX_CHARACTERS;
+    }
+  }
+
+  function handleCharacterAdd() {
+    if (state.characters.length >= MAX_CHARACTERS) return;
+    state.characters.push({
+      id: uid(),
+      name: '',
+      prompt: '',
+      uc: '',
+      center: null,
+    });
+    renderCharacters();
+    markDirty();
+    const cards = ui.characterList?.querySelectorAll('.character-card');
+    cards?.[cards.length - 1]?.querySelector('.character-name')?.focus();
+  }
+
   /* NovelAI presets -------------------------------------------------------- */
 
   function cloneNaiPreset(preset) {
@@ -1694,6 +2299,11 @@
       height: preset.height,
       seed: preset.seed,
       qualityToggle: preset.qualityToggle,
+      ucPresetId: preset.ucPresetId,
+      qualityPresetId: preset.qualityPresetId,
+      transparentBackground: preset.transparentBackground,
+      varietyBoost: preset.varietyBoost,
+      characters: cloneCharacters(preset.characters),
       basePositive: preset.basePositive,
       artistPrompt: preset.artistPrompt,
       negativePrompt: preset.negativePrompt,
@@ -1715,6 +2325,11 @@
       height: Number.isFinite(Number(raw.height)) ? Number(raw.height) : 1216,
       seed: Number.isInteger(Number(raw.seed)) ? Number(raw.seed) : -1,
       qualityToggle: typeof raw.qualityToggle === 'boolean' ? raw.qualityToggle : true,
+      ucPresetId: asText(raw.ucPresetId, 'heavy'),
+      qualityPresetId: asText(raw.qualityPresetId, 'standard'),
+      transparentBackground: raw.transparentBackground === true,
+      varietyBoost: raw.varietyBoost === true,
+      characters: cloneCharacters(raw.characters),
       basePositive: asText(raw.basePositive),
       artistPrompt: asText(raw.artistPrompt),
       negativePrompt: asText(raw.negativePrompt),
@@ -1749,6 +2364,11 @@
       height: Number(ui.height.value),
       seed: Number.isInteger(seedValue) && seedValue >= 0 ? seedValue : -1,
       qualityToggle: ui.qualityToggle.checked,
+      ucPresetId: ui.ucPreset?.value || 'heavy',
+      qualityPresetId: ui.qualityPreset?.value || 'standard',
+      transparentBackground: Boolean(ui.transparentBg?.checked),
+      varietyBoost: Boolean(ui.varietyBoost?.checked),
+      characters: collectCharacters(),
       timeoutSeconds: Number.isFinite(timeout) ? Math.min(900, Math.max(30, timeout)) : 300,
       basePositive: ui.basePositive.value,
       artistPrompt: ui.artistPrompt.value,
@@ -1785,6 +2405,13 @@
     ui.seed.value = Number.isInteger(seed) && seed >= 0 ? String(seed) : '-1';
     ui.qualityToggle.checked =
       typeof settings.qualityToggle === 'boolean' ? settings.qualityToggle : true;
+    if (ui.ucPreset) ui.ucPreset.value = asText(settings.ucPresetId, 'heavy');
+    if (ui.qualityPreset) ui.qualityPreset.value = asText(settings.qualityPresetId, 'standard');
+    if (ui.transparentBg) ui.transparentBg.checked = settings.transparentBackground === true;
+    if (ui.varietyBoost) ui.varietyBoost.checked = settings.varietyBoost === true;
+    state.characters = cloneCharacters(settings.characters);
+    renderCharacters();
+    updateNaiCapabilityUi();
     ui.basePositive.value = asText(settings.basePositive);
     ui.artistPrompt.value = asText(settings.artistPrompt);
     ui.negativePrompt.value = asText(settings.negativePrompt);
@@ -2075,6 +2702,9 @@
     const novai = config?.novelai || {};
 
     applyLlmSettings(llm);
+    state.structuredOutput = llm.structuredOutput === true;
+    state.activePromptPresetId = asText(llm.activePromptPresetId);
+    if (ui.structuredOutput) ui.structuredOutput.checked = state.structuredOutput;
 
     state.presets = Array.isArray(llm.presets)
       ? llm.presets.map(normalizePreset).filter(Boolean)
@@ -4795,6 +5425,7 @@
       }
 
       loadRecords().catch(() => {});
+      loadDiagnostics().catch(() => {});
       setStage(
         'success',
         job.kind === 'rerender'
@@ -5286,6 +5917,25 @@
     ui.llmPresetDelete.addEventListener('click', handlePresetDelete);
     ui.promptBlockAdd.addEventListener('click', addPromptBlock);
 
+    // Prompt presets (对比不同提示词).
+    ui.promptPreset.addEventListener('change', handlePromptPresetChange);
+    ui.promptPresetSave.addEventListener('click', handlePromptPresetSave);
+    ui.promptPresetDelete.addEventListener('click', handlePromptPresetDelete);
+    ui.promptPresetExport.addEventListener('click', handlePromptPresetExport);
+    ui.promptPresetImport.addEventListener('click', () => ui.promptPresetFile.click());
+    ui.promptPresetFile.addEventListener('change', handlePromptPresetImportFile);
+    ui.structuredOutput.addEventListener('change', () => {
+      state.structuredOutput = ui.structuredOutput.checked;
+      markDirty();
+    });
+
+    // Characters.
+    ui.characterAdd.addEventListener('click', handleCharacterAdd);
+
+    // Diagnostics.
+    ui.diagRefresh.addEventListener('click', loadDiagnostics);
+    ui.diagClear.addEventListener('click', handleDiagClear);
+
     // NovelAI presets.
     ui.naiPreset.addEventListener('change', handleNaiPresetChange);
     ui.naiPresetSave.addEventListener('click', handleNaiPresetSave);
@@ -5345,6 +5995,10 @@
       ui.naiSampler,
       ui.noiseSchedule,
       ui.qualityToggle,
+      ui.ucPreset,
+      ui.qualityPreset,
+      ui.transparentBg,
+      ui.varietyBoost,
       ui.naiTimeout,
       ui.steps,
       ui.scale,
@@ -5357,10 +6011,14 @@
       ui.negativePrompt,
     ];
     for (const control of configControls) {
+      if (!control) continue;
       const eventName =
         control instanceof HTMLSelectElement || control.type === 'checkbox' ? 'change' : 'input';
       control.addEventListener(eventName, markDirty);
     }
+
+    // 换模型要同步能力相关的 UI（V5 预设、锁定 Steps、透明背景等）。
+    ui.naiModel.addEventListener('change', updateNaiCapabilityUi);
 
     // Save.
     ui.saveConfig.addEventListener('click', handleSave);
@@ -5716,6 +6374,10 @@
     ]);
 
     state.loaded = true;
+
+    // 预设列表与模型能力都依赖服务端状态，配置载入后再补一次。
+    await Promise.allSettled([loadCapabilities(), loadPromptPresets(), loadDiagnostics()]);
+    updateNaiCapabilityUi();
 
     if (configResult.status === 'fulfilled') {
       state.dirty = false;

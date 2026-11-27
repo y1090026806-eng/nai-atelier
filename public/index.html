@@ -8,7 +8,7 @@
   <meta name="description" content="本地运行的 LLM Tags × NovelAI 创作工作台">
   <title>NAI Atelier · LLM × NovelAI</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%231e1e2e'/%3E%3Cpath d='M32 9l5 18 18 5-18 5-5 18-5-18-18-5 18-5z' fill='%23cba6f7'/%3E%3Ccircle cx='46' cy='17' r='3' fill='%2389b4fa'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/style.css?v=1.9.1">
+  <link rel="stylesheet" href="/style.css?v=2.0.0">
 </head>
 <body data-mobile-tab="gallery">
   <div class="ambient ambient--lavender" aria-hidden="true"></div>
@@ -138,6 +138,34 @@
             <button type="button" class="mini-btn prompt-block-add" id="prompt-block-add">+ 添加提示词</button>
             <p class="field-help">按列表顺序发送；你输入的描述始终位于「用户输入之前」与「之后」两组之间。</p>
           </div>
+
+          <div class="field">
+            <div class="label-row">
+              <label for="prompt-preset">提示词预设</label>
+              <span class="field-hint" id="prompt-preset-hint"></span>
+            </div>
+            <div class="preset-row">
+              <select id="prompt-preset" aria-label="提示词预设">
+                <option value="custom">当前提示词（自定义）</option>
+              </select>
+            </div>
+            <div class="preset-io-row">
+              <button type="button" class="mini-btn" id="prompt-preset-save">保存当前为预设</button>
+              <button type="button" class="mini-btn" id="prompt-preset-delete" disabled>删除</button>
+              <button type="button" class="mini-btn" id="prompt-preset-export" title="导出全部提示词预设为 JSON">导出</button>
+              <button type="button" class="mini-btn" id="prompt-preset-import" title="从 JSON 导入提示词预设">导入</button>
+              <input type="file" id="prompt-preset-file" accept=".json,application/json" hidden>
+            </div>
+            <div class="switch-field switch-field--tight">
+              <div class="switch-copy">
+                <label for="structured-output">结构化标签输出</label>
+                <p>让模型返回 JSON（场景 + 角色 + 负面），失败自动回退一行 tags</p>
+              </div>
+              <input class="switch-input" id="structured-output" type="checkbox">
+              <label class="switch-control" for="structured-output" aria-label="启用结构化标签输出"><span></span></label>
+            </div>
+            <p class="field-help">选中预设会立即替换「提示词结构」；内置预设只读，可「保存当前为预设」另存一份再改。</p>
+          </div>
         </section>
 
         <div class="section-divider" aria-hidden="true"></div>
@@ -180,6 +208,7 @@
             <select id="nai-model">
               <optgroup label="NovelAI Diffusion V5">
                 <option value="nai-diffusion-5-full">V5 Full</option>
+                <option value="nai-diffusion-5-full-medium">V5 Full Medium（蒸馏·快）</option>
                 <option value="nai-diffusion-5-curated">V5 Curated</option>
               </optgroup>
               <optgroup label="NovelAI Diffusion V4.5">
@@ -225,11 +254,77 @@
           <div class="switch-field">
             <div class="switch-copy">
               <label for="quality-toggle">Quality Tags</label>
-              <p>让 NovelAI 自动附加内置质量词</p>
+              <p>让 NovelAI 自动附加内置质量词（V4/V3 生效）</p>
             </div>
             <input class="switch-input" id="quality-toggle" type="checkbox" checked>
             <label class="switch-control" for="quality-toggle" aria-label="启用或关闭 Quality Tags"><span></span></label>
           </div>
+
+          <div class="field-grid" id="v5-preset-fields" hidden>
+            <div class="field">
+              <label for="uc-preset">V5 负面预设</label>
+              <select id="uc-preset">
+                <option value="heavy" selected>Heavy · 强</option>
+                <option value="light">Light · 轻</option>
+                <option value="humanFocus">Human Focus</option>
+                <option value="furryFocus">Furry Focus</option>
+                <option value="none">None · 不附加</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="quality-preset">V5 质量预设</label>
+              <select id="quality-preset">
+                <option value="standard" selected>Standard</option>
+                <option value="light">Light</option>
+                <option value="none">None</option>
+              </select>
+            </div>
+          </div>
+          <p class="field-help" id="v5-preset-help" hidden>V5 的质量词与负面词由 NovelAI 端拼接；选 <code>None</code> 则完全由你的提示词决定。</p>
+
+          <div class="switch-field" id="transparent-field" hidden>
+            <div class="switch-copy">
+              <label for="transparent-bg">透明背景</label>
+              <p>请求 alpha 通道（V5，需模型支持）</p>
+            </div>
+            <input class="switch-input" id="transparent-bg" type="checkbox">
+            <label class="switch-control" for="transparent-bg" aria-label="启用或关闭透明背景"><span></span></label>
+          </div>
+
+          <div class="switch-field" id="variety-field" hidden>
+            <div class="switch-copy">
+              <label for="variety-boost">Variety Boost</label>
+              <p>V4.5 降低构图趋同（按分辨率自动抬 CFG 重缩放阈值）</p>
+            </div>
+            <input class="switch-input" id="variety-boost" type="checkbox">
+            <label class="switch-control" for="variety-boost" aria-label="启用或关闭 Variety Boost"><span></span></label>
+          </div>
+
+          <div class="field">
+            <div class="label-row">
+              <label id="characters-label">角色提示词</label>
+              <span class="field-hint" id="characters-hint"></span>
+            </div>
+            <div class="character-list" id="character-list" role="group" aria-labelledby="characters-label"></div>
+            <button type="button" class="mini-btn prompt-block-add" id="character-add">+ 添加角色</button>
+            <p class="field-help" id="characters-help">
+              每个角色单独写外貌与着装，能显著减少多人图「串装」。坐标留空则在 <code>0.5</code> 中线自动均分站位。
+            </p>
+          </div>
+
+          <details class="diag-panel" id="diag-panel">
+            <summary>
+              <span>最近请求诊断</span>
+              <span class="field-hint" id="diag-hint"></span>
+            </summary>
+            <div class="diag-body">
+              <div class="diag-list" id="diag-list"></div>
+              <div class="preset-io-row">
+                <button type="button" class="mini-btn" id="diag-refresh">刷新</button>
+                <button type="button" class="mini-btn" id="diag-clear">清空</button>
+              </div>
+            </div>
+          </details>
 
           <div class="field">
             <div class="label-row">
@@ -418,7 +513,7 @@
             <span class="connection-dot" aria-hidden="true"></span>
             <span>LOCAL ONLY</span>
           </div>
-          <span class="version-badge">v1.9</span>
+          <span class="version-badge">v2.0</span>
         </div>
       </header>
 
@@ -979,6 +1074,6 @@
 
   <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="/app.js?v=1.9.1" defer></script>
+  <script src="/app.js?v=2.0.0" defer></script>
 </body>
 </html>
