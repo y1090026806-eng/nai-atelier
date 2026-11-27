@@ -1,6 +1,6 @@
 {
   "name": "nai-atelier",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Local-first LLM tag generator + NovelAI image workbench",
   "main": "server.js",

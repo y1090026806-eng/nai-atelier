@@ -10,7 +10,7 @@
 > 最近维护：2026-11-26 — UI 可读性优化（未改后端 / 接口 / 版本号）：灯箱图片支持点击全屏查看原图（再点、`Esc` 或点击空白退出；`Esc` 先退全屏再关灯箱），详情栏改为内部滚动避免按钮被挤出；中文描述框、正 / 负提示词、提示词块与灯箱 Tag 编辑器放大字号并允许纵向拖拽。`npm run verify` 仍为 **235/235**，无头 Chrome 隔离 UI **20/20**，1366 / 1440 / 1920 与 390 宽度均无横向溢出。
 > 最近维护：2026-11-26 — 布局再平衡（前端，未改后端 / 接口 / 版本号）：输入区改为紧凑命令条（默认 2 行、自动增高、可展开编辑），队列改为浮层抽屉不再挤占画廊；画廊新增详细 / 紧凑双密度（矮屏自动紧凑、可手动切换并持久化），短屏断点压缩顶栏 / 画廊头 / 画册栏；桌面侧栏可折叠、新增专注画廊（Esc 退出）。`npm run verify` 仍为 **235/235**，无头 Chrome 隔离 UI **30/30**，1272 / 1366 / 1440 / 1920 / 390 均无横向溢出。
 > 最近维护：2026-11-27 — 版本 1.9.0：新增**设备间同步**（电脑 ↔ 手机）。两端各自离线生图，连同一 Wi-Fi 时在画廊头部「同步」面板里点「开始同步」，双向合并作品 / 画册 / 创作记录 / 回收站 / 提示词收藏；删除靠墓碑传播、排序靠时间戳、图片按 SHA-256 校验、同步前自动备份索引到 `data/backups/`。同步是**独立监听端口**（默认 `3801`，绑 `0.0.0.0`，只暴露 `/sync/*` 并要求 Bearer 口令），主应用仍只监听 `127.0.0.1`；`data/config.json` 里的 API Key **不参与同步**。`npm run verify` **244/244**，新增 `npm run test:sync`（10 项合并单测 + 32 项双实例端到端，全部通过）；文档见 [DEVICE-SYNC.md](DEVICE-SYNC.md) 与本文件 §13。代码已提交（`02ae1f5`）并推送到 GitHub 仓库（现为公开，分支 `main` + 标签 `v1.9.0`）。
-> 最近维护：2026-11-27 — 版本 2.0.0（绘图内核重做）：NovelAI V5 改走官方**流式协议**（`/ai/generate-image-stream` + multipart 单字段 `request` + 4 字节长度前缀的 MessagePack 帧，边收边解析、中间帧推进度、`samp_ix!==0` 只当预览）；新增**角色提示词与归一化坐标**（`characterPrompts` + `v4_prompt/char_captions` 同源同序，一图最多 10 角色，未给坐标时按人数自动排 0.5 / 0.33·0.67 / 0.28·0.5·0.72）；新增**结构化提示词**（LLM 返回 `{title,scene,characters[],negative}`，解析失败自动回退单行 tags）；新增**提示词预设**（4 套内置预设移植自 LittleWhiteBox 的 V5 / V4.5 / 场景规则指南，可保存 / 导入 / 导出 / 另存，导入同名自动加 `(2)`）；V5 新增 `ucPresetId` / `qualityPresetId` / 透明背景 / Variety Boost（`skip_cfg_above_sigma`）与 **V5 Full Medium**；请求新增**错误分类 + 429/5xx 自动重试**与**诊断面板**（`data/diagnostics.json`，保留 30 条）；代码拆出 `lib/`（能力表 / 编译 / 请求体 / 传输 / 流解析 / msgpack / 预设 / 解析 / tag 工具），新增 `npm run test:nai`（41 项）与 `npm run test:msgpack`（48 项）。`npm run verify` 扩到 **259 项**。上一版 1.9.1 重做手机端底部 Tab；1.9.0 新增设备间同步。
+> 最近维护：2026-11-27 — 版本 2.0.0（绘图内核重做）：NovelAI V5 改走官方**流式协议**（`/ai/generate-image-stream` + multipart 单字段 `request` + 4 字节长度前缀的 MessagePack 帧，边收边解析、中间帧推进度、`samp_ix!==0` 只当预览）；新增**角色提示词与归一化坐标**（`characterPrompts` + `v4_prompt/char_captions` 同源同序，一图最多 10 角色，未给坐标时按人数自动排 0.5 / 0.33·0.67 / 0.28·0.5·0.72）；新增**结构化提示词**（LLM 返回 `{title,scene,characters[],negative}`，解析失败自动回退单行 tags）；新增**提示词预设**（4 套内置预设照搬 LittleWhiteBox 场景 Agent 的 LLM 提示词分层（开场 / 材料 / Tag 指南 / 场景规则 / 输出契约，每段独立成块），可保存 / 导入 / 导出 / 另存，导入同名自动加 `(2)`）；V5 新增 `ucPresetId` / `qualityPresetId` / 透明背景 / Variety Boost（`skip_cfg_above_sigma`）与 **V5 Full Medium**；请求新增**错误分类 + 429/5xx 自动重试**与**诊断面板**（`data/diagnostics.json`，保留 30 条）；代码拆出 `lib/`（能力表 / 编译 / 请求体 / 传输 / 流解析 / msgpack / 预设 / 解析 / tag 工具），新增 `npm run test:nai`（41 项）与 `npm run test:msgpack`（48 项）。`npm run verify` 扩到 **261 项**。上一版 1.9.1 重做手机端底部 Tab；1.9.0 新增设备间同步。
 > 用途：在新对话中继续开发、维护或排查 NAI Atelier 时，先阅读本文件。
 > 注意：本项目在本地 `data/config.json` 中保存用户私密 API Key（该文件已被 `.gitignore` 忽略，不会进入仓库），并包含本地图片。不要读取、打印、复制或提交 `data/config.json` 的真实 Key；不要删除 `outputs/` 里的用户作品（现在也包括回收站 `outputs/.trash/` 与 `data/trash.json`）。
 
@@ -73,10 +73,10 @@ D:\NAI-Atelier\
 │  │  ├─ tags.js                # tag 去重口径（服务端与前端共用）
 │  │  ├─ parse.js               # 结构化输出解析（JSON 围栏 / 括号扫描）
 │  │  ├─ presets.js             # 提示词预设：归一化 / 导入 / 导出 / 合并
-│  │  └─ builtin-presets.js     # 4 套内置预设（移植自 LittleWhiteBox 指南）
+│  │  └─ builtin-presets.js     # 4 套内置预设（LWB 场景 Agent 的五段 LLM 提示词分层）
 │  └─ sync-merge.js             # 设备间同步合并规则（1.9.0）
 ├─ scripts\
-│  ├─ verify.js                 # npm run verify：临时目录 + 假上游自检（259 项）
+│  ├─ verify.js                 # npm run verify：临时目录 + 假上游自检（261 项）
 │  ├─ test-nai.js               # npm run test:nai：能力表 / 编译 / 请求体 / 解析 / 预设（41 项）
 │  └─ test-msgpack.js           # npm run test:msgpack：msgpack + V5 帧解析（48 项）
 ├─ start-nai-atelier.bat        # Windows 一键启动
@@ -138,7 +138,7 @@ D:\NAI-Atelier\
   - 环境变量：`PORT`、`HOST`、`DATA_DIR`、`OUTPUTS_DIR`。
   - `module.exports` 额外导出 `normalizeConfig`，供 `scripts/verify.js` 直接做纯归一化测试。
 - `scripts/verify.js`
-  - `npm run verify` 的实现：随机空闲端口 + 临时 `DATA_DIR`/`OUTPUTS_DIR` 启动 `server.js`，用本地假 LLM/NovelAI 上游（含 slow 模式，V5 假上游会回 MessagePack 帧）跑 **259** 项检查，结束时清理。
+  - `npm run verify` 的实现：随机空闲端口 + 临时 `DATA_DIR`/`OUTPUTS_DIR` 启动 `server.js`，用本地假 LLM/NovelAI 上游（含 slow 模式，V5 假上游会回 MessagePack 帧）跑 **261** 项检查，结束时清理。
   - 不读取真实配置、不访问外网、不消耗额度；改动后端后应优先跑它。
 - `public/index.html`
   - 左侧 LLM（预设 / 模型 / 参数 / 提示词结构 / **提示词预设 + 结构化输出开关**）/ NovelAI（预设 / 模型 / 采样 / **V5 预设与透明背景 / Variety** / **角色提示词卡片** / **请求诊断** / 请求超时）/ 提示词配置。
@@ -286,11 +286,12 @@ git push origin --tags
 
 - 侧栏 LLM 区「提示词预设」下拉：按「内置预设 / 我的预设」分组，另有「当前提示词（自定义）」；切换会 `POST /api/prompt-presets/apply`，只替换 `promptBlocks` 与 `structuredOutput`，不动其他未保存字段。
 - 数据存在 `config.llm.promptPresets`（上限 40，`MAX_PROMPT_PRESETS`），`config.llm.activePromptPresetId` 记录当前选中项；`normalizeLlmPreset()` 会剔除这两项，避免 LLM 配置预设把提示词预设再复制一份。
-- 4 套内置预设（`lib/prompts/builtin-presets.js`，id 前缀 `builtin-`，不可删除）：
-  - `builtin-baseline-tags`：原有的一行 Danbooru tags 口径（兼容旧行为）；
-  - `builtin-v5-scene-tags`：移植自 LittleWhiteBox `提示词编写指南-V5.md`（tag + 自然语言混合、总量与排序、角色 / 构图 / 光影、负向规则）；
-  - `builtin-v45-tags`：移植自 `TAG编写指南-V4.5.md`（逗号 tag、权重写法、画师串位置）；
-  - `builtin-scene-json`：场景规则 + JSON 契约（自动打开结构化输出）。
+- 4 套内置预设（`lib/prompts/builtin-presets.js`，id 前缀 `builtin-`，不可删除）。结构照搬 LittleWhiteBox 场景 Agent 发给 **LLM** 的提示词分层（`opening.md` → `buildScenePlannerFrameText` → Tag 指南 → `scene-rules.md` → 原 `submit_scene_plan` 字段描述），每段一个独立 `promptBlock`，可单独编辑：
+  - `builtin-baseline-tags`：1 块，原有的一行 Danbooru tags 口径（对照基线）；
+  - `builtin-lwb-planner-v5`：5 块（开场 / 材料与输出去向 / V5 Tag 指南 / 场景规则 / JSON 契约），`structuredOutput: true`；
+  - `builtin-lwb-planner-v45`：5 块，指南换成 `TAG编写指南-V4.5.md` 的短 tag 口径，同样结构化；
+  - `builtin-lwb-single-line`：4 块（开场 / 材料 / V5 指南 / 单行契约），不产生结构化字段。
+- 多段 system 块在发送前由 `mergeSystemMessages()`（server.js，`buildChatMessages` 末尾）合并成一条 system 消息、空行分段——分块只是为了编辑体验，避免只接受单条 system 的端点报错。
 - 导出：`GET /api/prompt-presets/export[?id=...]`，格式 `{app:'nai-atelier', kind:'nai-atelier/prompt-presets', version:1, presets:[...]}`；导入支持整份导出文件、裸数组、单个预设对象，同名加 `(2)` 后缀并分配新 id，不覆盖已有内容。
 - 手动编辑任一提示词块会清空 `activePromptPresetId`，下拉回到「自定义」。
 
@@ -619,7 +620,7 @@ git push origin --tags
 ## 9. 已完成的验证
 
 0. **2.0.0 绘图内核回归（2026-11-27）**
-   - `npm run verify` **259/259**：在临时目录 + 假上游（V5 分支返回 MessagePack 帧，另含 slow / error / no-image / structured 模式）上跑真实 `server.js`，新增覆盖：V5 流式端点与 `params_version:4`、能力表、uc / quality 预设、提示词预设的保存 / 应用 / 导入 / 导出 / 内置保护、结构化提示词（JSON 契约注入 → `scene` + `characters` → `characterPrompts` 与 `char_captions` 同源同序 → 不返回 JSON 时回退 tags）、诊断接口。
+   - `npm run verify` **261/261**：在临时目录 + 假上游（V5 分支返回 MessagePack 帧，另含 slow / error / no-image / structured 模式）上跑真实 `server.js`，新增覆盖：V5 流式端点与 `params_version:4`、能力表、uc / quality 预设、提示词预设的保存 / 应用 / 导入 / 导出 / 内置保护、结构化提示词（JSON 契约注入 → `scene` + `characters` → `characterPrompts` 与 `char_captions` 同源同序 → 不返回 JSON 时回退 tags）、诊断接口。
    - `npm run test:nai` **41/41**：能力表、编译（角色合并 / 坐标 / V3 内联 / forceSfw）、两套请求体、结构化解析、预设导入导出、tag 去重、HTTP 分类与重试决策。
    - `npm run test:msgpack` **48/48**：mini 编码器往返、逐字节喂入、任意切分、`samp_ix` 降级、超限与截断错误、真实形状 payload。
    - `npm run test:sync` 仍为 32 项，未受影响。
@@ -772,7 +773,7 @@ git push origin --tags
 - ~~导出 PNG 元数据或配套 JSON~~（1.7.0 已实现：PNG `parameters` / `NAI-Atelier` 文本块 + `.json` sidecar + ZIP 导出）。
 - ~~画册封面、拖拽排序、跨画册批量移动~~（1.6.0 已实现）。
 - ~~NovelAI V5 流式协议 / 角色提示词与坐标~~（2.0.0 已实现：`generate-image-stream` + MessagePack 帧、`characterPrompts` + `char_captions`）。
-- ~~LLM 提示词预设（含导入 / 导出）~~（2.0.0 已实现：4 套内置 + 保存 / 更新 / 导入 / 导出 / 另存）。
+- ~~LLM 提示词预设（含导入 / 导出）~~（2.0.0 已实现：4 套内置，按 LWB 五段结构拆分 + 保存 / 更新 / 导入 / 导出 / 另存）。
 - ~~结构化提示词（场景 + 角色 JSON）~~（2.0.0 已实现：JSON 契约 + 失败回退单行 tags）。
 - ~~错误分类 / 自动重试 / 请求诊断~~（2.0.0 已实现）。
 - ~~V5 的 ucPresetId / qualityPresetId / 透明背景 / Variety Boost / V5 Full Medium~~（2.0.0 已实现）。
@@ -803,7 +804,7 @@ git push origin --tags
     - 真实 `data/history.json` 已补 `recordId` / `variantId` / `userText`，新增 `data/records.json`；`outputs/` 图片未改动。1.8.0 改动尚未提交 Git / 打标签。
 
 17. **2.0.0：绘图内核重做（2026-11-27）**
-    - `npm run verify` **259/259**（新增 15 项：能力表 / uc-quality 预设 / 提示词预设 CRUD 与导入导出 / 内置保护 / 配置落盘 / 诊断接口 / 结构化模式提示词注入 / 场景与角色拆分 / `characterPrompts` 与 `char_captions` 同源 / 非 JSON 回退）；假上游新增 V5 `generate-image-stream` 分支与 MessagePack 帧构造，仍然不访问外网、不消耗额度。
+    - `npm run verify` **261/261**（新增 17 项：LWB 预设多块结构、多段 system 合并、能力表 / uc-quality 预设 / 提示词预设 CRUD 与导入导出 / 内置保护 / 配置落盘 / 诊断接口 / 结构化模式提示词注入 / 场景与角色拆分 / `characterPrompts` 与 `char_captions` 同源 / 非 JSON 回退）；假上游新增 V5 `generate-image-stream` 分支与 MessagePack 帧构造，仍然不访问外网、不消耗额度。
     - `npm run test:nai` **41/41**、`npm run test:msgpack` **48/48**；`npm run test:sync` 仍 **32** 项通过。
     - 前端：`node --check public/app.js`、`node --check server.js` 通过；`index.html` 全部 262 个 id 与 `cacheElements()` 对齐（唯一历史遗留 `m-composer-head` 由 `ui.mTabButtons` 手动赋值）；新增控件在 900px 断点做了触控放大。
     - 兼容：旧配置无需迁移（新字段缺省即关闭）；`rerenderFromHistory` 直接用已编译 prompt 构造 plan，避免画师串 / 基础正向重复；旧模型的 ZIP 解析路径未改。

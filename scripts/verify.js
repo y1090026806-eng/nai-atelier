@@ -3340,6 +3340,37 @@ async function run() {
     }),
   );
 
+  /* LWB 内置预设：多段式 system 块 + 发送前合并成一条 system 消息 */
+  const pbPlannerPresetId = pbBuiltinPresets.find((item) => item.id === 'builtin-lwb-planner-v5')?.id;
+  const pbPlannerApplied = pbPlannerPresetId
+    ? await request('POST', '/api/prompt-presets/apply', { body: { id: pbPlannerPresetId } })
+    : { status: 0, body: {} };
+  const pbAfterPlannerApply = await request('GET', '/api/config');
+  const appliedBlocks = pbAfterPlannerApply.body?.config?.llm?.promptBlocks || [];
+  check(
+    'LWB 预设按开场/材料/指南/规则/契约分成多块',
+    pbPlannerApplied.status === 200 &&
+      appliedBlocks.length >= 5 &&
+      appliedBlocks.every((block) => block.role === 'system' && block.position === 'before') &&
+      appliedBlocks.some((block) => block.content.includes('## 场景规则')) &&
+      appliedBlocks.some((block) => block.content.includes('## 输出契约')),
+    JSON.stringify(appliedBlocks.map((block) => block.content.slice(0, 12))),
+  );
+
+  await generate('披着雨衣的女孩蹲在便利店门口');
+  const mergedSystem = (mock.llmRequests.at(-1)?.body?.messages || []).filter(
+    (message) => message.role === 'system',
+  );
+  check(
+    '多段 system 块在发送前合并成一条消息',
+    mergedSystem.length === 1 && mergedSystem[0].content.includes('## 输出契约'),
+    JSON.stringify({ count: mergedSystem.length }),
+  );
+
+  if (pbCustomPreset?.id) {
+    await request('POST', '/api/prompt-presets/apply', { body: { id: pbCustomPreset.id } });
+  }
+
   const pbDiagnostics = await request('GET', '/api/nai/diagnostics');
   check(
     '诊断记录接口可读',

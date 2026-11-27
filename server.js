@@ -56,7 +56,7 @@ const {
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.0.1';
 
 const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
@@ -853,7 +853,25 @@ function buildChatMessages(llm, userText, { titleHint = '' } = {}) {
   }
 
   const userContent = titleHint ? `${userText}\n\n${titleHint}` : userText;
-  return [...before, { role: 'user', content: userContent }, ...after];
+  return mergeSystemMessages([...before, { role: 'user', content: userContent }, ...after]);
+}
+
+/**
+ * 相邻的 system 消息合并成一条。
+ * 提示词预设是按「开场 / 材料 / 指南 / 规则 / 契约」分块存的，逐块下发更利于编辑；
+ * 但不少 OpenAI 兼容端点（以及部分代理）只接受一条 system 消息，所以发送前合并且用空行分段。
+ */
+function mergeSystemMessages(messages) {
+  const merged = [];
+  for (const message of messages) {
+    const previous = merged[merged.length - 1];
+    if (message.role === 'system' && previous?.role === 'system') {
+      previous.content = `${previous.content}\n\n${message.content}`;
+      continue;
+    }
+    merged.push({ ...message });
+  }
+  return merged;
 }
 
 async function generateTagsWithOpenAi(llm, userText, signal, { maxCharacters = 6 } = {}) {
